@@ -125,15 +125,37 @@ class StreamWorker(multiprocessing.Process):
     after a restart.
     """
 
-    def __init__(self, camera: CameraConfig, frame_queue: multiprocessing.Queue):
+    def __init__(
+        self,
+        camera: CameraConfig,
+        frame_queue: multiprocessing.Queue,
+        restart_counter: Optional[multiprocessing.Value] = None,
+        last_error: Optional[multiprocessing.Array] = None,
+    ):
         super().__init__(name=f"stream-{camera.name}")
         self.camera = camera
         self.frame_queue = frame_queue
+        self.restart_counter = restart_counter
+        self.last_error = last_error
         self.width = 0
         self.height = 0
 
+    def _set_error(self, msg: str) -> None:
+        """Best-effort write of the latest failure reason into the shared
+        buffer the manager exposes via stats(); truncated to fit."""
+        if self.last_error is None:
+            return
+        try:
+            data = msg.encode("utf-8", errors="replace")
+            self.last_error.value = data[: len(self.last_error) - 1]
+        except Exception:
+            pass
+
+    def _clear_error(self) -> None:
+        self._set_error("")
+
     def run(self) -> None:
-        self.width, self.height, fps = _probe_stream(self.camera.url)
+        fps = self._probe_with_retry()
         log.info(
             "camera %s: probed %dx%d @ ~%.2ffps, starting hw decode",
             self.camera.name, self.width, self.height, fps,
@@ -150,6 +172,7 @@ class StreamWorker(multiprocessing.Process):
                 )
                 time.sleep(sleep_s)
                 attempt += 1
+                self._count_restart()
                 continue
 
             frame_size = self.width * self.height * 3
@@ -170,6 +193,8 @@ class StreamWorker(multiprocessing.Process):
                     )
                     _queue_put_dropold(self.frame_queue, frame)
                     frames_after_restart += 1
+                    if frames_after_restart == 1:
+                        self._clear_error()
             finally:
                 proc.stdout.close()
                 proc.stderr.close()
@@ -179,18 +204,51 @@ class StreamWorker(multiprocessing.Process):
                 attempt = 0
             sleep_s = _restart_on_failure(attempt)
             stderr_tail = " | ".join(stderr_lines[-3:])
+            if stderr_tail:
+                self._set_error(f"stream ended: {stderr_tail[:200]}")
             log.warning(
                 "camera %s: stream ended after %d frames (attempt %d), restart in %.0fs %s",
                 self.camera.name, frames_after_restart, attempt, sleep_s, stderr_tail,
             )
             time.sleep(sleep_s)
             attempt += 1
+            self._count_restart()
+
+    def _count_restart(self) -> None:
+        if self.restart_counter is not None:
+            self.restart_counter.value += 1
+
+    def _probe_with_retry(self) -> float:
+        """Probe the stream, backing off on failure until it succeeds.
+
+        Never raises: a worker that starts while its camera is down must
+        survive and connect once the camera comes back. Both probe errors
+        and slow probes (ffprobe timeout) count as failures.
+        """
+        attempt = 0
+        while True:
+            try:
+                self.width, self.height, fps = _probe_stream(self.camera.url)
+                self._clear_error()
+                return fps
+            except (StreamProbeError, subprocess.TimeoutExpired) as exc:
+                sleep_s = _restart_on_failure(attempt)
+                detail = getattr(exc, "stderr", None) or str(exc)
+                self._set_error(f"probe failed: {detail[:200]}")
+                log.error(
+                    "camera %s: probe failed, retrying in %.0fs (attempt %d): %s",
+                    self.camera.name, sleep_s, attempt, detail,
+                )
+                time.sleep(sleep_s)
+                attempt += 1
+                self._count_restart()
 
     def _spawn_decoder(self) -> Optional[subprocess.Popen]:
         cmd = _build_ffmpeg_cmd(self.camera.url, self.width, self.height)
         try:
             return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as exc:
+            self._set_error(f"cannot launch ffmpeg: {exc}")
             log.error("camera %s: cannot launch ffmpeg: %s", self.camera.name, exc)
             return None
 

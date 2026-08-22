@@ -1,0 +1,11 @@
+# Minimal config for the M1 local test harness: 4 independent paths,
+# one per simulated camera. All server defaults apply (RTSP :8554,
+# RTMP :1935, HLS :8888).
+hlsAlwaysRemux: true
+hlsVariant: mpegts
+
+paths:
+  cam_a:
+  cam_b:
+  cam_c:
+  cam_d:

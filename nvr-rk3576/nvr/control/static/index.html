@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NVR control panel</title>
+<style>
+  body { font-family: monospace; margin: 2em; background: #111; color: #ddd; }
+  h1 { font-size: 1.2em; }
+  table { border-collapse: collapse; width: 100%; max-width: 1100px; }
+  th, td { border: 1px solid #333; padding: 6px 10px; text-align: left; }
+  th { background: #222; }
+  input[type=text] { background: #1a1a1a; color: #ddd; border: 1px solid #444; padding: 3px; width: 100%; }
+  input:disabled, button:disabled { opacity: 0.4; }
+  .badge { padding: 2px 8px; border-radius: 3px; font-size: 0.85em; }
+  .running { background: #1d5c1d; }
+  .stopped { background: #5c1d1d; }
+  .note { color: #888; font-size: 0.85em; }
+  .error { color: #ff8080; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<h1>NVR control panel</h1>
+<div class="note">frames/fps shown from the ingest queues; edits are in-memory only (lost on panel restart).</div>
+<table id="cameras">
+  <thead>
+    <tr>
+      <th>name</th><th>url</th><th></th><th></th><th></th><th></th>
+      <th>status</th><th>fps</th><th>frames</th><th>restarts</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+<p class="error" id="global-error"></p>
+
+<script>
+"use strict";
+
+const tbody = document.querySelector("#cameras tbody");
+
+function errorRow(msg) {
+  const tr = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = 10;
+  td.className = "error";
+  td.textContent = msg;
+  tr.appendChild(td);
+  return tr;
+}
+
+function row(cam) {
+  const tr = document.createElement("tr");
+  tr.dataset.cam = cam.name;
+  const input = (value, disabled) => {
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.value = value;
+    inp.disabled = disabled;
+    return inp;
+  };
+
+  const nameInput = input(cam.name, cam.alive);
+  const urlInput = input(cam.url, cam.alive);
+  const running = cam.alive;
+
+  const nameTd = document.createElement("td");
+  nameTd.appendChild(nameInput);
+  const urlTd = document.createElement("td");
+  urlTd.appendChild(urlInput);
+
+  const saveBtn = document.createElement("button");
+  saveBtn.textContent = "Save";
+  saveBtn.disabled = running;
+  const startBtn = document.createElement("button");
+  startBtn.textContent = "Start";
+  startBtn.disabled = running;
+  const stopBtn = document.createElement("button");
+  stopBtn.textContent = "Stop";
+  stopBtn.disabled = !running;
+
+  // Opens the mediamtx player for this camera on the same host the panel
+  // is served from (works from any IP you browse to). cam_d is the
+  // standalone HTTP-FLV source, so its page loads but shows no video.
+  const watchLink = document.createElement("a");
+  watchLink.textContent = "watch";
+  watchLink.href = "http://" + location.hostname + ":8888/" + cam.name + "/";
+  watchLink.target = "_blank";
+
+  const badge = document.createElement("span");
+  badge.className = "badge " + (running ? "running" : "stopped");
+  badge.textContent = running ? "running" : "stopped";
+
+  const note = document.createElement("td");
+  note.className = "note";
+  if (cam.last_error) {
+    note.textContent = cam.last_error.length > 90 ? cam.last_error.slice(0, 90) + "…" : cam.last_error;
+    note.classList.add("error");
+    note.title = cam.last_error;
+  } else if (running) {
+    note.textContent = "stop to edit";
+  }
+
+  const saveTd = document.createElement("td");
+  saveTd.appendChild(saveBtn);
+  const startTd = document.createElement("td");
+  startTd.appendChild(startBtn);
+  const stopTd = document.createElement("td");
+  stopTd.appendChild(stopBtn);
+  const watchTd = document.createElement("td");
+  watchTd.appendChild(watchLink);
+
+  const statusTd = document.createElement("td");
+  statusTd.appendChild(badge);
+  const fpsTd = document.createElement("td");
+  fpsTd.textContent = cam.fps;
+  const framesTd = document.createElement("td");
+  framesTd.textContent = cam.frames_received;
+  const restartsTd = document.createElement("td");
+  restartsTd.textContent = cam.restart_count;
+
+  const errorTd = document.createElement("td");
+  errorTd.colSpan = 10;
+  errorTd.className = "error";
+
+  tr.append(nameTd, urlTd, saveTd, startTd, stopTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, note);
+  tr.appendChild(errorTd);
+
+  const act = (url, opts, after) => {
+    errorTd.textContent = "";
+    fetch(url, opts)
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          errorTd.textContent = body.error || ("HTTP " + res.status);
+          return;
+        }
+        after();
+      })
+      .catch((e) => { errorTd.textContent = "request failed: " + e; });
+  };
+
+  saveBtn.onclick = () => {
+    const newName = nameInput.value.trim();
+    const newUrl = urlInput.value.trim();
+    if (!newName) { errorTd.textContent = "name cannot be empty"; return; }
+    if (!newUrl) { errorTd.textContent = "url cannot be empty"; return; }
+    act("/api/cameras/" + encodeURIComponent(cam.name), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newName, url: newUrl }),
+    }, refresh);
+  };
+  startBtn.onclick = () => act("/api/cameras/" + encodeURIComponent(cam.name) + "/start", { method: "POST" }, refresh);
+  stopBtn.onclick = () => act("/api/cameras/" + encodeURIComponent(cam.name) + "/stop", { method: "POST" }, refresh);
+
+  return tr;
+}
+
+// The poll re-renders the table every 2s, which would wipe any in-progress
+// edit. Capture the focused row's inputs before rebuilding and restore them
+// afterwards so typing/deleting is never clobbered.
+function editingState() {
+  const el = document.activeElement;
+  if (!el || el.tagName !== "INPUT" || !tbody.contains(el)) return null;
+  const tr = el.closest("tr");
+  if (!tr || !tr.dataset.cam) return null;
+  const inputs = tr.querySelectorAll("input[type=text]");
+  if (inputs.length < 2) return null;
+  return {
+    cam: tr.dataset.cam,
+    field: el === inputs[0] ? "name" : "url",
+    name: inputs[0].value,
+    url: inputs[1].value,
+  };
+}
+
+function restoreEdit(state) {
+  if (!state) return;
+  const tr = tbody.querySelector('tr[data-cam="' + CSS.escape(state.cam) + '"]');
+  if (!tr) return;
+  const inputs = tr.querySelectorAll("input[type=text]");
+  if (inputs.length < 2 || inputs[0].disabled || inputs[1].disabled) return;
+  inputs[0].value = state.name;
+  inputs[1].value = state.url;
+  const target = state.field === "name" ? inputs[0] : inputs[1];
+  target.focus();
+  target.setSelectionRange(target.value.length, target.value.length);
+}
+
+function refresh() {
+  const pending = editingState();
+  fetch("/api/cameras")
+    .then((res) => res.json())
+    .then((cams) => {
+      tbody.replaceChildren();
+      cams.forEach((cam) => tbody.appendChild(row(cam)));
+      restoreEdit(pending);
+    })
+    .catch((e) => {
+      tbody.replaceChildren();
+      tbody.appendChild(errorRow("cannot reach /api/cameras: " + e));
+    });
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
