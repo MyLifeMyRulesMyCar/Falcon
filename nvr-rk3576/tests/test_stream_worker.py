@@ -17,7 +17,8 @@ from nvr.ingest.stream_worker import (
 def test_build_ffmpeg_cmd_exact_argv():
     expected = [
         "ffmpeg",
-        "-hwaccel", "rkmpp",
+        "-init_hw_device", "drm:/dev/dri/renderD128",
+        "-hwaccel", "drm",
         "-i", "rtsp://x",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
@@ -29,9 +30,11 @@ def test_build_ffmpeg_cmd_exact_argv():
 
 def test_build_ffmpeg_cmd_uses_given_dimensions_only_in_comment_free_exact_form():
     cmd = _build_ffmpeg_cmd("https://hls.example/playlist.m3u8", 1920, 1080)
-    assert cmd[4] == "https://hls.example/playlist.m3u8"
+    assert cmd[6] == "https://hls.example/playlist.m3u8"
     assert cmd == [
-        "ffmpeg", "-hwaccel", "rkmpp",
+        "ffmpeg",
+        "-init_hw_device", "drm:/dev/dri/renderD128",
+        "-hwaccel", "drm",
         "-i", "https://hls.example/playlist.m3u8",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-vsync", "0", "pipe:1",

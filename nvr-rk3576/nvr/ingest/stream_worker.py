@@ -82,11 +82,15 @@ def _probe_stream(url: str) -> tuple[int, int, float]:
     return int(width), int(height), _parse_fraction(stream.get("r_frame_rate", "0/1"))
 
 
+_DRM_DEVICE = "/dev/dri/renderD128"
+
+
 def _build_ffmpeg_cmd(url: str, width: int, height: int) -> list[str]:
     """Return the exact argv used to decode ``url`` to raw bgr24 frames."""
     return [
         "ffmpeg",
-        "-hwaccel", "rkmpp",
+        "-init_hw_device", f"drm:{_DRM_DEVICE}",
+        "-hwaccel", "drm",
         "-i", url,
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
