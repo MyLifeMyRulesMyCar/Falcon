@@ -6,12 +6,18 @@
 set -e
 cd "$(dirname "$0")"
 
-# Generate the shared loopable test clip on first run (h264_rkmpp: this
-# board's ffmpeg build has no libx264 encoder).
+# Generate the shared loopable test clip on first run: the first 30s of the
+# Big Buck Bunny trailer (real content — people/animals for the NPU), scaled
+# to 640x360 and re-encoded with h264_rkmpp (this board's ffmpeg build has no
+# libx264 encoder). Two steps (download then transcode) so a flaky network
+# can't break the encode.
 if [ ! -f sample.mp4 ]; then
-    echo "generating testbed/sample.mp4 (h264_rkmpp) ..."
-    ffmpeg -loglevel error -f lavfi -i testsrc=size=640x360:rate=30 \
-        -t 10 -c:v h264_rkmpp -b:v 800k -g 30 -r 30 sample.mp4
+    echo "generating testbed/sample.mp4 (BBB trailer 30s, h264_rkmpp) ..."
+    curl -sL -o .bbb_src.mp4 \
+        https://uploads.video-commander.com/sample/BigBuckBunny.mp4
+    ffmpeg -loglevel error -i .bbb_src.mp4 -t 30 \
+        -vf scale=640:360 -c:v h264_rkmpp -b:v 800k -g 30 -r 30 sample.mp4
+    rm -f .bbb_src.mp4
 fi
 
 if [ -f mediamtx.pid ] && kill -0 "$(cat mediamtx.pid)" 2>/dev/null; then

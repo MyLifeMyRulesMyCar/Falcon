@@ -6,6 +6,7 @@ for the bench, not something to expose past localhost/LAN.
 
 import threading
 import time
+from typing import Optional
 
 from flask import Flask, jsonify, request
 
@@ -15,10 +16,21 @@ from nvr.ingest.manager import IngestManager
 _DRAIN_INTERVAL = 0.005
 
 
-def create_app(manager: IngestManager, cameras: dict[str, CameraConfig]) -> Flask:
+def create_app(
+    manager: IngestManager,
+    cameras: dict[str, CameraConfig],
+    detection_stats: Optional[dict] = None,
+    restart_detection: Optional[callable] = None,
+) -> Flask:
     """Build the Flask app. ``cameras`` is the live name->config dict the
-    panel edits; the manager must own the same CameraConfig objects."""
+    panel edits; the manager must own the same CameraConfig objects.
+    ``detection_stats`` is the DetectionWorker's shared stats dict (optional;
+    absent for tests, all detection fields default to zero/empty).
+    ``restart_detection`` is called after any start/stop/rename so the
+    DetectionWorker re-forks with the current queue snapshot (optional;
+    absent for tests)."""
     app = Flask(__name__, static_url_path="/static")
+    detection_stats = detection_stats if detection_stats is not None else {}
 
     # Frame counters only advance when someone drains the queues. The smoke
     # test does that in its loop; here a background thread does it so the
@@ -60,6 +72,13 @@ def create_app(manager: IngestManager, cameras: dict[str, CameraConfig]) -> Flas
             s = manager.stats().get(name, {})
             alive = bool(s.get("alive", False))
             frames = int(s.get("frames_received", 0))
+            d = detection_stats.get(name, {})
+            # When the DetectionWorker is active it consumes every queue
+            # frame (motion gate), starving the panel's drain counter — its
+            # total+skipped IS the ingest frame count, so prefer it.
+            worker_frames = int(d.get("total", 0)) + int(d.get("skipped", 0))
+            if worker_frames:
+                frames = worker_frames
             rows.append(
                 {
                     "name": cfg.name,
@@ -69,6 +88,9 @@ def create_app(manager: IngestManager, cameras: dict[str, CameraConfig]) -> Flas
                     "restart_count": int(s.get("restart_count", 0)),
                     "fps": round(fps_of(name, frames), 1),
                     "last_error": s.get("last_error", ""),
+                    "inference_fps": round(float(d.get("inference_fps", 0.0)), 1),
+                    "skip_ratio": round(float(d.get("skip_ratio", 0.0)), 2),
+                    "last_detections": d.get("last_detections", []),
                 }
             )
         return jsonify(rows)
@@ -78,6 +100,8 @@ def create_app(manager: IngestManager, cameras: dict[str, CameraConfig]) -> Flas
         if name not in cameras:
             return jsonify({"error": f"unknown camera: {name}"}), 404
         manager.start_one(name)
+        if restart_detection is not None:
+            restart_detection()
         return jsonify({"name": name, "alive": True})
 
     @app.post("/api/cameras/<name>/stop")
@@ -85,6 +109,8 @@ def create_app(manager: IngestManager, cameras: dict[str, CameraConfig]) -> Flas
         if name not in cameras:
             return jsonify({"error": f"unknown camera: {name}"}), 404
         manager.stop_one(name)
+        if restart_detection is not None:
+            restart_detection()
         return jsonify({"name": name, "alive": False})
 
     @app.put("/api/cameras/<name>")
@@ -107,6 +133,8 @@ def create_app(manager: IngestManager, cameras: dict[str, CameraConfig]) -> Flas
             return jsonify({"error": "stop the camera before editing"}), 409
         cameras.pop(name, None)
         cameras[new_name] = new_config
+        if restart_detection is not None:
+            restart_detection()
         return jsonify({"name": new_name, "url": body["url"]})
 
     return app

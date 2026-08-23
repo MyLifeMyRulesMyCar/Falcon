@@ -26,6 +26,7 @@
     <tr>
       <th>name</th><th>url</th><th></th><th></th><th></th><th></th>
       <th>status</th><th>fps</th><th>frames</th><th>restarts</th>
+      <th>infer fps</th><th>skip%</th><th>detections</th>
     </tr>
   </thead>
   <tbody></tbody>
@@ -40,7 +41,7 @@ const tbody = document.querySelector("#cameras tbody");
 function errorRow(msg) {
   const tr = document.createElement("tr");
   const td = document.createElement("td");
-  td.colSpan = 10;
+  td.colSpan = 13;
   td.className = "error";
   td.textContent = msg;
   tr.appendChild(td);
@@ -117,11 +118,21 @@ function row(cam) {
   const restartsTd = document.createElement("td");
   restartsTd.textContent = cam.restart_count;
 
+  const inferTd = document.createElement("td");
+  inferTd.textContent = cam.inference_fps;
+  const skipTd = document.createElement("td");
+  skipTd.textContent = cam.skip_ratio;
+  const detTd = document.createElement("td");
+  detTd.className = "note";
+  detTd.textContent = (cam.last_detections || [])
+    .map((d) => d.class_name + ":" + d.confidence)
+    .join(", ");
+
   const errorTd = document.createElement("td");
-  errorTd.colSpan = 10;
+  errorTd.colSpan = 13;
   errorTd.className = "error";
 
-  tr.append(nameTd, urlTd, saveTd, startTd, stopTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, note);
+  tr.append(nameTd, urlTd, saveTd, startTd, stopTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, inferTd, skipTd, detTd, note);
   tr.appendChild(errorTd);
 
   const act = (url, opts, after) => {

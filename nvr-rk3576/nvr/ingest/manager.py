@@ -151,11 +151,16 @@ class IngestManager:
         for name in list(self._workers):
             self._close_queue(name)
 
-    def get_queue(self, camera_name: str) -> multiprocessing.Queue:
-        try:
-            return self._queues[camera_name]
-        except KeyError:
-            raise KeyError(f"unknown camera: {camera_name}") from None
+    def get_queue(self, camera_name: str) -> Optional[multiprocessing.Queue]:
+        """Return the camera's current frame queue, or ``None`` if the camera
+        is configured but not started (its queue is dropped on stop).
+
+        Raises:
+            KeyError: if ``camera_name`` is not a configured camera.
+        """
+        if camera_name not in self._cameras:
+            raise KeyError(f"unknown camera: {camera_name}")
+        return self._queues.get(camera_name)
 
     def is_alive(self, camera_name: str) -> bool:
         if camera_name not in self._cameras:

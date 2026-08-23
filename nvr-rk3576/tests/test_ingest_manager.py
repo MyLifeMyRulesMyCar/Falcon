@@ -161,6 +161,18 @@ def test_get_queue_raises_keyerror_for_unknown_camera():
         mgr.get_queue("nope")
 
 
+def test_get_queue_returns_none_for_not_started_and_stopped_cameras():
+    mgr = IngestManager(CAMERAS, worker_factory=FakeWorker)
+
+    assert mgr.get_queue("cam_a") is None  # never started
+
+    mgr.start_one("cam_a")
+    assert mgr.get_queue("cam_a") is not None
+
+    mgr.stop_one("cam_a")
+    assert mgr.get_queue("cam_a") is None  # queue dropped on stop
+
+
 def test_is_alive_raises_keyerror_for_unknown_camera():
     mgr = IngestManager(CAMERAS, worker_factory=FakeWorker)
     mgr.start()

@@ -68,6 +68,9 @@ class StubManager:
     def stats(self):
         return dict(self.stats_data)
 
+    def get_queue(self, name):
+        return object() if name in self.running else None
+
 
 @pytest.fixture()
 def client():
@@ -86,7 +89,36 @@ def test_list_cameras_shape_all_stopped(client):
         assert row["alive"] is False
         assert row["frames_received"] == 0
         assert row["restart_count"] == 0
+        assert row["inference_fps"] == 0.0
+        assert row["skip_ratio"] == 0.0
+        assert row["last_detections"] == []
         assert "fps" in row and "url" in row
+
+
+def test_list_cameras_surfaces_detection_stats():
+    import multiprocessing
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    detection_stats = multiprocessing.Manager().dict()
+    detection_stats["cam_a"] = {
+        "inference_fps": 7.5,
+        "skip_ratio": 0.2,
+        "last_detections": [{"class_name": "person", "confidence": 0.88}],
+    }
+    app = create_app(mgr, cameras, detection_stats=detection_stats)
+    app.config["TESTING"] = True
+    rows = app.test_client().get("/api/cameras").get_json()
+
+    cam_a = [r for r in rows if r["name"] == "cam_a"][0]
+    assert cam_a["inference_fps"] == 7.5
+    assert cam_a["skip_ratio"] == 0.2
+    assert cam_a["last_detections"] == [{"class_name": "person", "confidence": 0.88}]
+    cam_b = [r for r in rows if r["name"] == "cam_b"][0]
+    assert cam_b["inference_fps"] == 0.0
+    assert cam_b["last_detections"] == []
 
 
 def test_start_unknown_camera_404(client):
@@ -141,3 +173,21 @@ def test_index_serves_page(client):
     res = client.get("/")
     assert res.status_code == 200
     assert b"control panel" in res.data
+
+
+def test_restart_callback_fires_on_start_stop():
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    calls = []
+    app = create_app(mgr, cameras, restart_detection=lambda: calls.append("restart"))
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    client.post("/api/cameras/cam_a/start")
+    client.post("/api/cameras/cam_a/stop")
+    client.put("/api/cameras/cam_a", json={"name": "cam_a", "url": "rtsp://new"})
+    assert calls == ["restart", "restart", "restart"]
+    assert client.post("/api/cameras/nope/start").status_code == 404
+    assert calls == ["restart", "restart", "restart"]  # unknown: no callback

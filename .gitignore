@@ -30,3 +30,6 @@ nvr-rk3576/testbed/sample.mp4
 nvr-rk3576/testbed/*.pid
 nvr-rk3576/testbed/auto.crt
 nvr-rk3576/testbed/auto.key
+
+# RKNN model binary (copied from ~/rk3576_rknn_yolov5_demo/model/)
+nvr-rk3576/nvr/inference/model/*.rknn

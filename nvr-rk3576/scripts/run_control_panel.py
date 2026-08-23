@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import multiprocessing
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nvr.config import load_config
 from nvr.control.api import create_app
+from nvr.inference.detection_worker import DetectionWorker
 from nvr.ingest.manager import IngestManager
 
 
@@ -28,7 +30,20 @@ def main() -> None:
     config = load_config(args.config)
     cameras = {c.name: c for c in config.cameras}
     manager = IngestManager(config.cameras)  # cameras start stopped
-    app = create_app(manager, cameras)
+    stats = multiprocessing.Manager().dict()
+    worker = DetectionWorker(list(cameras), manager, stats)
+    worker.start()
+
+    def restart_worker() -> None:
+        """Re-fork the DetectionWorker so it inherits the current queue
+        snapshot (multiprocessing.Queue objects are fork-only shared)."""
+        nonlocal worker
+        worker.terminate()
+        worker.join(timeout=5)
+        worker = DetectionWorker(list(cameras), manager, stats)
+        worker.start()
+
+    app = create_app(manager, cameras, detection_stats=stats, restart_detection=restart_worker)
     print(f"control panel: http://{args.host}:{args.port}  ({len(cameras)} cameras)")
     app.run(host=args.host, port=args.port, threaded=True)
 
