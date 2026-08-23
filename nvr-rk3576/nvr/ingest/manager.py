@@ -33,6 +33,7 @@ class IngestManager:
         self._queues: dict[str, multiprocessing.Queue] = {}
         self._restart_counters: dict[str, multiprocessing.Value] = {}
         self._errors: dict[str, multiprocessing.Array] = {}
+        self._frames_decoded: dict[str, multiprocessing.Value] = {}
         self._frames: dict[str, int] = {c.name: 0 for c in cameras}
         self._last_frame_ts: dict[str, Optional[float]] = {c.name: None for c in cameras}
 
@@ -57,12 +58,16 @@ class IngestManager:
         # a plain Value's semaphore held, blocking stats() forever.
         restart_counter = multiprocessing.RawValue("i", 0)
         last_error = multiprocessing.RawArray("c", _ERROR_BUFFER_SIZE)
-        worker = self._worker_factory(camera, queue, restart_counter, last_error)
+        frames_decoded = multiprocessing.RawValue("i", 0)
+        worker = self._worker_factory(
+            camera, queue, restart_counter, last_error, frames_decoded
+        )
         worker.start()
         self._workers[name] = worker
         self._queues[name] = queue
         self._restart_counters[name] = restart_counter
         self._errors[name] = last_error
+        self._frames_decoded[name] = frames_decoded
 
     def stop_one(self, name: str, timeout_sec: float = 5.0) -> None:
         """Stop just one camera's worker; no-op if it is not running.
@@ -109,6 +114,7 @@ class IngestManager:
             self._workers.pop(name, None)
             self._restart_counters.pop(name, None)
             self._errors.pop(name, None)
+            self._frames_decoded.pop(name, None)
             self._close_queue(name)
 
     def consume(self, timeout: float = 0.05) -> dict[str, int]:
@@ -170,16 +176,19 @@ class IngestManager:
 
     def stats(self) -> dict[str, dict]:
         """Return per-camera ``{alive, frames_received, restart_count,
-        last_frame_ts, last_error}``.
+        last_frame_ts, last_error, frames_decoded}``.
 
-        Cameras that were never started report ``alive: False`` and zero
-        counters rather than raising.
+        ``frames_decoded`` is the true ingest rate — frames produced by the
+        decoder, independent of who consumes the queue. Cameras that were
+        never started report ``alive: False`` and zero counters rather than
+        raising.
         """
         stats = {}
         for name in self._cameras:
             worker = self._workers.get(name)
             counter = self._restart_counters.get(name)
             error = self._errors.get(name)
+            decoded = self._frames_decoded.get(name)
             last_error = ""
             if error is not None:
                 try:
@@ -192,5 +201,6 @@ class IngestManager:
                 "restart_count": counter.value if counter is not None else 0,
                 "last_frame_ts": self._last_frame_ts.get(name, None),
                 "last_error": last_error,
+                "frames_decoded": decoded.value if decoded is not None else 0,
             }
         return stats

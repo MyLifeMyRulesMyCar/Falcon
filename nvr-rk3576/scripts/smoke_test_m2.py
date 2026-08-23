@@ -59,12 +59,10 @@ def main() -> None:
         for cam in manager.stats():
             s = manager.stats()[cam]
             d = st.get(cam, {})
-            # Prefer the worker's frame count (it consumes every queue frame
-            # for the motion gate, starving the manager's drain counter).
-            worker_frames = d.get("total", 0) + d.get("skipped", 0)
-            frames = worker_frames if worker_frames else s["frames_received"]
-            ingest_fps = (frames - prev_frames[cam]) / max(args.interval, 0.001)
-            prev_frames[cam] = frames
+            # True ingest fps: decoder production (immune to queue consumers).
+            decoded = int(s.get("frames_decoded", 0))
+            ingest_fps = (decoded - prev_frames[cam]) / max(args.interval, 0.001)
+            prev_frames[cam] = decoded
             total = d.get("total", 0)
             combined += (total - prev_totals[cam]) / max(args.interval, 0.001)
             prev_totals[cam] = total

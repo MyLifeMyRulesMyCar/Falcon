@@ -79,6 +79,8 @@ def create_app(
             worker_frames = int(d.get("total", 0)) + int(d.get("skipped", 0))
             if worker_frames:
                 frames = worker_frames
+            # True ingest fps: decoder production, immune to queue consumers.
+            decoded = int(s.get("frames_decoded", 0))
             rows.append(
                 {
                     "name": cfg.name,
@@ -86,7 +88,7 @@ def create_app(
                     "alive": alive,
                     "frames_received": frames,
                     "restart_count": int(s.get("restart_count", 0)),
-                    "fps": round(fps_of(name, frames), 1),
+                    "fps": round(fps_of(name, decoded) if decoded else 0.0, 1),
                     "last_error": s.get("last_error", ""),
                     "inference_fps": round(float(d.get("inference_fps", 0.0)), 1),
                     "skip_ratio": round(float(d.get("skip_ratio", 0.0)), 2),

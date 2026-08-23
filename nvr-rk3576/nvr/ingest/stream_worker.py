@@ -131,14 +131,22 @@ class StreamWorker(multiprocessing.Process):
         frame_queue: multiprocessing.Queue,
         restart_counter: Optional[multiprocessing.Value] = None,
         last_error: Optional[multiprocessing.Array] = None,
+        frames_decoded: Optional[multiprocessing.Value] = None,
     ):
         super().__init__(name=f"stream-{camera.name}")
         self.camera = camera
         self.frame_queue = frame_queue
         self.restart_counter = restart_counter
         self.last_error = last_error
+        self.frames_decoded = frames_decoded
         self.width = 0
         self.height = 0
+
+    def _count_decoded(self) -> None:
+        """Best-effort total of frames produced by ffmpeg (true ingest rate,
+        independent of whoever consumes the queue)."""
+        if self.frames_decoded is not None:
+            self.frames_decoded.value += 1
 
     def _set_error(self, msg: str) -> None:
         """Best-effort write of the latest failure reason into the shared
@@ -193,6 +201,7 @@ class StreamWorker(multiprocessing.Process):
                     )
                     _queue_put_dropold(self.frame_queue, frame)
                     frames_after_restart += 1
+                    self._count_decoded()
                     if frames_after_restart == 1:
                         self._clear_error()
             finally:

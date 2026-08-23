@@ -7,6 +7,10 @@ Multi-camera NVR ingest layer for Radxa CM4 (RK3576).
 - **M1** — four streams over four protocols (RTSP/RTMP/HLS/HTTP-FLV) under
   one `IngestManager`, with a local testbed, a smoke test, and a minimal
   operator control panel (M1.1). Details in `docs/m1_ingest.md`.
+- **M2** — NPU object detection (YOLOv5s/COCO-80) gated by a per-camera
+  motion detector, dual-core NPU parallelism, live detections in the
+  control panel, and true-ingest instrumentation. Details in
+  `docs/m2_detection.md`.
 
 ## Requirements
 
@@ -93,7 +97,10 @@ pytest tests/                              # unit tests (no network)
 python scripts/smoke_test_m1.py --duration 120    # per-camera fps/restarts
 python scripts/smoke_test_m1.py --duration 1800   # 30-min soak
 
-python scripts/run_control_panel.py        # M1.1: http://127.0.0.1:5050
+python scripts/verify_detector_m2.py       # M2: bus.jpg calibration gate (needs NPU)
+python scripts/smoke_test_m2.py --duration 120    # M2: ingest|infer fps, skip%, detections
+
+python scripts/run_control_panel.py        # M1.1/M2: http://127.0.0.1:5050
 ```
 
 The M0 smoke test (`scripts/smoke_test_m0.py`) is unchanged but now uses
@@ -112,6 +119,22 @@ Verified on the board:
 - 30-min soak: 53k frames per camera at ~30 fps, `restarts: 0`, memory flat.
 - CPU budget for M2: ~63% of one core for 4x 640x360 decode+colorspace
   (~2.4 cores projected for 4x 720p); Python ingest stack ~1.5 cores.
+
+## M2 — NPU detection + motion gate
+
+One `DetectionWorker` owns both NPU cores: a feeder thread motion-gates
+frames from all cameras into a shared queue; two core threads (one per
+NPU core) run the detector. The panel shows per-camera `infer fps`,
+`skip%` (motion-gate savings) and live detections. Verified on the board:
+
+- Calibration gate: all 5 bus.jpg ground-truth detections within conf
+  ±0.013 (score 0.029); decode findings baked in (no sigmoid — baked into
+  the ReLU-variant graph; `wh = (2*wh)^2 * anchor`; BGR->RGB flip).
+- Dual-core parallelism: GIL check 1.91x; cam_a-only 17.2 detections/s
+  (~1.8x); 4-camera combined ~12/s, capped by ingest demand, not NPU.
+- True ingest (decoder-counted) stays ~25-30 fps with detection active —
+  the earlier "ingest regression" was a metric artifact.
+- pytest: 57 passed. Details + full measurements in `docs/m2_detection.md`.
 
 ## Control panel (M1.1)
 

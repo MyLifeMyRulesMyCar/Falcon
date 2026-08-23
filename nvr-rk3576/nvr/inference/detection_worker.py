@@ -19,6 +19,7 @@ import multiprocessing
 import queue
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -30,7 +31,8 @@ from nvr.motion.motion_gate import MotionGate
 
 log = logging.getLogger(__name__)
 
-MODEL_PATH = "nvr/inference/model/yolov5s_relu_rk3576.rknn"
+# File-relative: the worker may be launched from any cwd (panel/smoke/tests).
+MODEL_PATH = str(Path(__file__).resolve().parent / "model" / "yolov5s_relu_rk3576.rknn")
 _RING_SIZE = 30
 _EMPTY_LOOP_SLEEP = 0.002
 _MAX_BATCH = 8

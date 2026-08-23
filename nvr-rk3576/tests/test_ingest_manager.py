@@ -22,11 +22,12 @@ CAMERAS = [
 class FakeWorker:
     """Minimal multiprocessing.Process-compatible stub."""
 
-    def __init__(self, camera, frame_queue, restart_counter=None, last_error=None):
+    def __init__(self, camera, frame_queue, restart_counter=None, last_error=None, frames_decoded=None):
         self.camera = camera
         self.frame_queue = frame_queue
         self.restart_counter = restart_counter
         self.last_error = last_error
+        self.frames_decoded = frames_decoded
         self.started = False
         self.terminated = False
         self.killed = False
@@ -53,19 +54,27 @@ class FakeWorker:
 def test_start_creates_one_worker_and_queue_per_camera():
     created = []
 
-    def factory(camera, queue, restart_counter, last_error):
-        created.append((camera, queue, restart_counter, last_error))
-        return FakeWorker(camera, queue, restart_counter, last_error)
+    def factory(camera, queue, restart_counter, last_error, frames_decoded):
+        created.append((camera, queue, restart_counter, last_error, frames_decoded))
+        return FakeWorker(camera, queue, restart_counter, last_error, frames_decoded)
 
     mgr = IngestManager(CAMERAS, worker_factory=factory)
     mgr.start()
 
-    assert [camera.name for camera, _, _, _ in created] == ["cam_a", "cam_b"]
-    for camera, queue, restart_counter, last_error in created:
+    assert [camera.name for camera, _, _, _, _ in created] == ["cam_a", "cam_b"]
+    for camera, queue, restart_counter, last_error, frames_decoded in created:
         assert queue._maxsize == 16
         assert restart_counter.value == 0
         assert last_error is not None
+        assert frames_decoded is not None
         assert camera.name in ("cam_a", "cam_b")
+
+
+def test_stats_surfaces_frames_decoded():
+    mgr = IngestManager(CAMERAS, worker_factory=FakeWorker)
+    mgr.start_one("cam_a")
+    mgr._frames_decoded["cam_a"].value = 1234
+    assert mgr.stats()["cam_a"]["frames_decoded"] == 1234
 
 
 def test_stop_terminates_every_worker_and_does_not_hang_on_dead_worker():
@@ -197,6 +206,7 @@ def test_stats_tolerates_unstarted_cameras():
         "restart_count": 0,
         "last_frame_ts": None,
         "last_error": "",
+        "frames_decoded": 0,
     }
 
 
