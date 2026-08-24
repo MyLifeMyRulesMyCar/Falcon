@@ -22,12 +22,14 @@ CAMERAS = [
 class FakeWorker:
     """Minimal multiprocessing.Process-compatible stub."""
 
-    def __init__(self, camera, frame_queue, restart_counter=None, last_error=None, frames_decoded=None):
+    def __init__(self, camera, frame_queue, restart_counter=None, last_error=None,
+                 frames_decoded=None, frame_store=None):
         self.camera = camera
         self.frame_queue = frame_queue
         self.restart_counter = restart_counter
         self.last_error = last_error
         self.frames_decoded = frames_decoded
+        self.frame_store = frame_store
         self.started = False
         self.terminated = False
         self.killed = False
@@ -54,20 +56,27 @@ class FakeWorker:
 def test_start_creates_one_worker_and_queue_per_camera():
     created = []
 
-    def factory(camera, queue, restart_counter, last_error, frames_decoded):
-        created.append((camera, queue, restart_counter, last_error, frames_decoded))
-        return FakeWorker(camera, queue, restart_counter, last_error, frames_decoded)
+    def factory(camera, queue, restart_counter, last_error, frames_decoded, frame_store):
+        created.append((camera, queue, restart_counter, last_error, frames_decoded, frame_store))
+        return FakeWorker(camera, queue, restart_counter, last_error, frames_decoded, frame_store)
 
     mgr = IngestManager(CAMERAS, worker_factory=factory)
     mgr.start()
 
-    assert [camera.name for camera, _, _, _, _ in created] == ["cam_a", "cam_b"]
-    for camera, queue, restart_counter, last_error, frames_decoded in created:
+    assert [camera.name for camera, *_ in created] == ["cam_a", "cam_b"]
+    for camera, queue, restart_counter, last_error, frames_decoded, frame_store in created:
         assert queue._maxsize == 16
         assert restart_counter.value == 0
         assert last_error is not None
         assert frames_decoded is not None
         assert camera.name in ("cam_a", "cam_b")
+
+
+def test_manager_passes_frame_store_to_workers():
+    store = object()
+    mgr = IngestManager(CAMERAS, worker_factory=FakeWorker, frame_store=store)
+    mgr.start_one("cam_a")
+    assert mgr._workers["cam_a"].frame_store is store
 
 
 def test_stats_surfaces_frames_decoded():

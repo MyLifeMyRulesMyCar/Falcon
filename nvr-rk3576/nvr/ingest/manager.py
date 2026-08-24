@@ -26,9 +26,15 @@ _WorkerFactory = Callable[
 class IngestManager:
     """Own one :class:`StreamWorker` per camera, plus its queue and restart counter."""
 
-    def __init__(self, cameras: list[CameraConfig], worker_factory: _WorkerFactory = StreamWorker):
+    def __init__(
+        self,
+        cameras: list[CameraConfig],
+        worker_factory: _WorkerFactory = StreamWorker,
+        frame_store=None,
+    ):
         self._cameras = {c.name: c for c in cameras}
         self._worker_factory = worker_factory
+        self.frame_store = frame_store
         self._workers: dict[str, multiprocessing.Process] = {}
         self._queues: dict[str, multiprocessing.Queue] = {}
         self._restart_counters: dict[str, multiprocessing.Value] = {}
@@ -60,7 +66,7 @@ class IngestManager:
         last_error = multiprocessing.RawArray("c", _ERROR_BUFFER_SIZE)
         frames_decoded = multiprocessing.RawValue("i", 0)
         worker = self._worker_factory(
-            camera, queue, restart_counter, last_error, frames_decoded
+            camera, queue, restart_counter, last_error, frames_decoded, self.frame_store
         )
         worker.start()
         self._workers[name] = worker

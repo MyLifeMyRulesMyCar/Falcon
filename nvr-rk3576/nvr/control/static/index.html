@@ -24,9 +24,9 @@
 <table id="cameras">
   <thead>
     <tr>
-      <th>name</th><th>url</th><th></th><th></th><th></th><th></th>
+      <th>name</th><th>url</th><th></th><th></th><th></th><th></th><th></th>
       <th>status</th><th>fps</th><th>frames</th><th>restarts</th>
-      <th>infer fps</th><th>skip%</th><th>detections</th>
+      <th>infer fps</th><th>skip%</th><th>detections</th><th>preview</th>
     </tr>
   </thead>
   <tbody></tbody>
@@ -38,10 +38,37 @@
 
 const tbody = document.querySelector("#cameras tbody");
 
+// Preview <img> elements are cached and REUSED across the 2s poll rebuilds —
+// recreating them would restart the MJPEG stream every refresh (flicker).
+const imgCache = {};
+const boxesMode = {};  // camera name -> draw boxes on preview?
+
+function previewCell(cam) {
+  const td = document.createElement("td");
+  const img = imgCache[cam.name] || (imgCache[cam.name] = document.createElement("img"));
+  img.width = 160;
+  img.height = 90;
+  img.style.border = "1px solid #444";
+  if (cam.alive) {
+    img.src = "/stream/" + cam.name + (boxesMode[cam.name] ? "/annotated" : "") + ".mjpg";
+  } else {
+    img.removeAttribute("src");
+  }
+  const btn = document.createElement("button");
+  btn.textContent = boxesMode[cam.name] ? "boxes: ON" : "boxes: OFF";
+  btn.onclick = () => {
+    boxesMode[cam.name] = !boxesMode[cam.name];
+    img.src = "/stream/" + cam.name + (boxesMode[cam.name] ? "/annotated" : "") + ".mjpg";
+    btn.textContent = boxesMode[cam.name] ? "boxes: ON" : "boxes: OFF";
+  };
+  td.append(img, document.createElement("br"), btn);
+  return td;
+}
+
 function errorRow(msg) {
   const tr = document.createElement("tr");
   const td = document.createElement("td");
-  td.colSpan = 13;
+  td.colSpan = 15;
   td.className = "error";
   td.textContent = msg;
   tr.appendChild(td);
@@ -78,6 +105,11 @@ function row(cam) {
   stopBtn.textContent = "Stop";
   stopBtn.disabled = !running;
 
+  // Independent of Start/Stop: flips the DetectionWorker's per-camera flag
+  // live (no re-fork); while stopped it just sets the default for next start.
+  const detectBtn = document.createElement("button");
+  detectBtn.textContent = cam.detection_enabled ? "Detect: ON" : "Detect: OFF";
+
   // Opens the mediamtx player for this camera on the same host the panel
   // is served from (works from any IP you browse to). cam_d is the
   // standalone HTTP-FLV source, so its page loads but shows no video.
@@ -106,6 +138,8 @@ function row(cam) {
   startTd.appendChild(startBtn);
   const stopTd = document.createElement("td");
   stopTd.appendChild(stopBtn);
+  const detectTd = document.createElement("td");
+  detectTd.appendChild(detectBtn);
   const watchTd = document.createElement("td");
   watchTd.appendChild(watchLink);
 
@@ -128,11 +162,13 @@ function row(cam) {
     .map((d) => d.class_name + ":" + d.confidence)
     .join(", ");
 
+  const prevTd = previewCell(cam);
+
   const errorTd = document.createElement("td");
-  errorTd.colSpan = 13;
+  errorTd.colSpan = 15;
   errorTd.className = "error";
 
-  tr.append(nameTd, urlTd, saveTd, startTd, stopTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, inferTd, skipTd, detTd, note);
+  tr.append(nameTd, urlTd, saveTd, startTd, stopTd, detectTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, inferTd, skipTd, detTd, prevTd, note);
   tr.appendChild(errorTd);
 
   const act = (url, opts, after) => {
@@ -162,6 +198,9 @@ function row(cam) {
   };
   startBtn.onclick = () => act("/api/cameras/" + encodeURIComponent(cam.name) + "/start", { method: "POST" }, refresh);
   stopBtn.onclick = () => act("/api/cameras/" + encodeURIComponent(cam.name) + "/stop", { method: "POST" }, refresh);
+  detectBtn.onclick = () => act(
+    "/api/cameras/" + encodeURIComponent(cam.name) + "/detection/" + (cam.detection_enabled ? "off" : "on"),
+    { method: "POST" }, refresh);
 
   return tr;
 }
@@ -202,6 +241,14 @@ function refresh() {
   fetch("/api/cameras")
     .then((res) => res.json())
     .then((cams) => {
+      // Drop previews for cameras that are no longer running (kills their
+      // MJPEG connections); live ones are reused from imgCache.
+      for (const [name, img] of Object.entries(imgCache)) {
+        if (!cams.some((c) => c.name === name && c.alive)) {
+          img.removeAttribute("src");
+          delete imgCache[name];
+        }
+      }
       tbody.replaceChildren();
       cams.forEach((cam) => tbody.appendChild(row(cam)));
       restoreEdit(pending);

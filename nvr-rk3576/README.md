@@ -106,6 +106,48 @@ python scripts/run_control_panel.py        # M1.1/M2: http://127.0.0.1:5050
 The M0 smoke test (`scripts/smoke_test_m0.py`) is unchanged but now uses
 `cam_a` from the config, so the testbed must be running.
 
+## Operations
+
+### Manual start / stop / restart
+
+```bash
+# everything (after a reboot, or to re-run the whole stack)
+./testbed/start_testbed.sh            # 4 simulated cameras (mediamtx + publishers)
+python scripts/run_control_panel.py --host 0.0.0.0   # panel on :5050 (foreground)
+# or detached:
+nohup setsid scripts/run_panel.sh < /dev/null > /dev/null 2>&1 &
+
+# start the cameras once the panel is up (or click Start in the UI)
+for c in cam_a cam_b cam_c cam_d; do
+  curl -s -X POST http://127.0.0.1:5050/api/cameras/$c/start > /dev/null
+done
+
+# stop
+pkill -f run_control_panel          # panel + detection worker + encoders
+./testbed/stop_testbed.sh all       # mediamtx + publishers
+./testbed/stop_testbed.sh cam_b     # just one camera's publisher (reconnect tests)
+```
+
+A panel restart resets in-memory state: cameras come back stopped and any
+URL edits are lost (`config/config.yaml` is the source of truth).
+
+### Auto-start on boot (systemd)
+
+Two enabled units bring the whole stack up automatically on reboot:
+
+```bash
+systemctl status nvr-testbed nvr-panel      # check
+systemctl restart nvr-panel                 # restart the panel
+journalctl -u nvr-panel -f                  # panel logs (Python stdout/stderr)
+sudo systemctl disable --now nvr-testbed nvr-panel   # stop auto-starting
+```
+
+`nvr-testbed.service` starts mediamtx + the 4 publishers; `nvr-panel.service`
+starts the control panel (ingest + detection + preview encoders) and then
+auto-starts all 4 cameras via `scripts/start_cameras.sh`. The panel runs as
+a `Type=simple` foreground process, so it is managed by systemd
+(`Restart=on-failure`) and its logs land in the journal.
+
 ## M1 — 4-stream mixed-protocol ingest
 
 One `IngestManager` runs one `StreamWorker` per camera, each with its own

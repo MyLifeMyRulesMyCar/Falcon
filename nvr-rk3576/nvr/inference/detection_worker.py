@@ -16,6 +16,7 @@ objects can only be shared through fork inheritance, not a Manager dict).
 
 import logging
 import multiprocessing
+import multiprocessing.queues
 import queue
 import threading
 import time
@@ -40,9 +41,11 @@ _WORK_QUEUE_MAXSIZE = 8
 
 
 def get_nowait_or_none(queue_obj: multiprocessing.Queue) -> Optional[np.ndarray]:
+    # multiprocessing.queues.Empty and queue.Empty are distinct classes;
+    # catch both so unit-test stubs using queue.Queue behave identically.
     try:
         return queue_obj.get_nowait()
-    except (multiprocessing.queues.Empty, EOFError, OSError):
+    except (queue.Empty, multiprocessing.queues.Empty, EOFError, OSError):
         return None
 
 
@@ -76,6 +79,46 @@ def _update_stats(prev, elapsed: float, detections, skipped: int) -> dict:
     return prev
 
 
+def _feed_camera(
+    name: str,
+    detection_flags: dict,
+    ingest_manager: IngestManager,
+    gate: MotionGate,
+    work_queue: queue.Queue,
+    update_stats,
+) -> bool:
+    """One camera's feeder step; returns True if frames were seen.
+
+    A camera with detection disabled is skipped entirely — no queue drain,
+    no stats writes (drop-oldest on the ingest queue absorbs overflow, and
+    the panel drain keeps counting its frames).
+    """
+    if not detection_flags.get(name, True):
+        return False
+    queue_obj = ingest_manager.get_queue(name)
+    if queue_obj is None:
+        return False  # camera not started, or was stopped
+    # Batch-read so a slow detect() doesn't throttle the count: count every
+    # frame, gate only the newest.
+    newest = None
+    count = 0
+    for _ in range(_MAX_BATCH):
+        frame = get_nowait_or_none(queue_obj)
+        if frame is None:
+            break
+        newest = frame
+        count += 1
+    if count == 0:
+        return False
+    if gate.should_run_inference(newest):
+        # backpressure: block when both cores are busy; drop-oldest on the
+        # ingest queue absorbs overflow.
+        work_queue.put((name, newest, count - 1))
+    else:
+        update_stats(name, 0.0, [], skipped=count)
+    return True
+
+
 class DetectionWorker(multiprocessing.Process):
     """Owns both NPU cores; motion-gates and detects frames for all cameras."""
 
@@ -84,11 +127,15 @@ class DetectionWorker(multiprocessing.Process):
         camera_names: list[str],
         ingest_manager: IngestManager,
         stats: dict,
+        detection_flags: Optional[dict] = None,
     ):
         super().__init__(name="detection-worker")
         self.camera_names = camera_names
         self.ingest_manager = ingest_manager
         self.stats = stats
+        # Shared (Manager) dict; read live every feeder pass, so toggling
+        # detection never requires re-forking. Absent -> all enabled.
+        self.detection_flags = detection_flags if detection_flags is not None else {}
 
     def run(self) -> None:
         gates = {name: MotionGate() for name in self.camera_names}
@@ -109,27 +156,14 @@ class DetectionWorker(multiprocessing.Process):
         def feeder() -> None:
             while True:
                 for name in self.camera_names:
-                    queue_obj = self.ingest_manager.get_queue(name)
-                    if queue_obj is None:
-                        continue  # camera not started, or was stopped
-                    # Batch-read so a slow detect() doesn't throttle the
-                    # count: count every frame, gate only the newest.
-                    newest = None
-                    count = 0
-                    for _ in range(_MAX_BATCH):
-                        frame = get_nowait_or_none(queue_obj)
-                        if frame is None:
-                            break
-                        newest = frame
-                        count += 1
-                    if count == 0:
-                        continue
-                    if gates[name].should_run_inference(newest):
-                        # backpressure: block when both cores are busy;
-                        # drop-oldest on the ingest queue absorbs overflow.
-                        work_queue.put((name, newest, count - 1))
-                    else:
-                        update_stats(name, 0.0, [], skipped=count)
+                    _feed_camera(
+                        name,
+                        self.detection_flags,
+                        self.ingest_manager,
+                        gates[name],
+                        work_queue,
+                        update_stats,
+                    )
 
         def core_worker(core: int) -> None:
             detector = ObjectDetector(pool)
@@ -142,7 +176,11 @@ class DetectionWorker(multiprocessing.Process):
                     name,
                     elapsed,
                     [
-                        {"class_name": d.class_name, "confidence": round(d.confidence, 2)}
+                        {
+                            "class_name": d.class_name,
+                            "confidence": round(d.confidence, 2),
+                            "bbox": [round(v, 1) for v in d.bbox_xyxy],
+                        }
                         for d in detections
                     ],
                     skipped=skipped,

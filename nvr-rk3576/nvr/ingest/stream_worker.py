@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 _FRAME_RATE_FALLBACK = 0.0
 _RESTART_CAP_SECONDS = 30
+_PREVIEW_INTERVAL = 0.16  # ~6 fps regular preview cadence (steady > fast)
 
 
 class StreamProbeError(Exception):
@@ -132,6 +133,7 @@ class StreamWorker(multiprocessing.Process):
         restart_counter: Optional[multiprocessing.Value] = None,
         last_error: Optional[multiprocessing.Array] = None,
         frames_decoded: Optional[multiprocessing.Value] = None,
+        frame_store=None,
     ):
         super().__init__(name=f"stream-{camera.name}")
         self.camera = camera
@@ -139,6 +141,9 @@ class StreamWorker(multiprocessing.Process):
         self.restart_counter = restart_counter
         self.last_error = last_error
         self.frames_decoded = frames_decoded
+        self.frame_store = frame_store
+        self._last_write_ts = 0.0
+        self._write_warned = False
         self.width = 0
         self.height = 0
 
@@ -204,6 +209,27 @@ class StreamWorker(multiprocessing.Process):
                     self._count_decoded()
                     if frames_after_restart == 1:
                         self._clear_error()
+                    # Throttled broadcast (~1/3 of ingest -> ~10 fps) for the
+                    # browser preview streams; skipped frames just age out.
+                    # Time-based broadcast throttle (~8 fps regular cadence)
+                    # for the browser preview streams: a steady frame rate
+                    # reads as smooth, unlike a count-based one that rides
+                    # the decode rate. Skipped frames just age out.
+                    now = time.monotonic()
+                    if (
+                        self.frame_store is not None
+                        and now - self._last_write_ts >= _PREVIEW_INTERVAL
+                    ):
+                        self._last_write_ts = now
+                        try:
+                            self.frame_store.write(self.camera.name, frame)
+                        except Exception:
+                            if not self._write_warned:
+                                self._write_warned = True
+                                log.warning(
+                                    "camera %s: frame_store.write failed (preview may be dark)",
+                                    self.camera.name,
+                                )
             finally:
                 proc.stdout.close()
                 proc.stderr.close()

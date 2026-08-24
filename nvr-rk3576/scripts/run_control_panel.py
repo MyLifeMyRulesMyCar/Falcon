@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import atexit
 import multiprocessing
 import sys
 from pathlib import Path
@@ -16,7 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nvr.config import load_config
 from nvr.control.api import create_app
+from nvr.control.preview_encoder import PreviewEncoder, make_slots
 from nvr.inference.detection_worker import DetectionWorker
+from nvr.ingest.frame_broadcast import LatestFrameStore
 from nvr.ingest.manager import IngestManager
 
 
@@ -29,10 +32,32 @@ def main() -> None:
 
     config = load_config(args.config)
     cameras = {c.name: c for c in config.cameras}
-    manager = IngestManager(config.cameras)  # cameras start stopped
+    # Must exist before start(): stream workers inherit the shared blocks
+    # at fork time. Blocks are allocated lazily per camera on first write,
+    # with that camera's own probed frame shape.
+    frame_store = LatestFrameStore([c.name for c in config.cameras])
+    atexit.register(frame_store.unlink_all)
+    manager = IngestManager(
+        config.cameras, frame_store=frame_store
+    )  # cameras start stopped
     stats = multiprocessing.Manager().dict()
-    worker = DetectionWorker(list(cameras), manager, stats)
+    detection_flags = multiprocessing.Manager().dict()
+    worker = DetectionWorker(list(cameras), manager, stats, detection_flags)
     worker.start()
+
+    # Dedicated preview encoders: all JPEG work leaves the panel's threads.
+    # Two processes (2 cameras each), each pinned to its own A72 core, so
+    # the encode load can't be preempted into jitter.
+    slots = make_slots(list(cameras))
+    names = list(cameras)
+    half = len(names) // 2
+    encoders = [
+        PreviewEncoder(names[:half], frame_store, slots, stats, detection_flags, a72_cores={4, 5}),
+        PreviewEncoder(names[half:], frame_store, slots, stats, detection_flags, a72_cores={6, 7}),
+    ]
+    for enc in encoders:
+        enc.start()
+        atexit.register(enc.terminate)
 
     def restart_worker() -> None:
         """Re-fork the DetectionWorker so it inherits the current queue
@@ -40,10 +65,18 @@ def main() -> None:
         nonlocal worker
         worker.terminate()
         worker.join(timeout=5)
-        worker = DetectionWorker(list(cameras), manager, stats)
+        worker = DetectionWorker(list(cameras), manager, stats, detection_flags)
         worker.start()
 
-    app = create_app(manager, cameras, detection_stats=stats, restart_detection=restart_worker)
+    app = create_app(
+        manager,
+        cameras,
+        detection_stats=stats,
+        restart_detection=restart_worker,
+        detection_flags=detection_flags,
+        frame_store=frame_store,
+        preview_slots=slots,
+    )
     print(f"control panel: http://{args.host}:{args.port}  ({len(cameras)} cameras)")
     app.run(host=args.host, port=args.port, threaded=True)
 

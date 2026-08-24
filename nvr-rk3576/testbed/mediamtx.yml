@@ -3,6 +3,9 @@
 # RTMP :1935, HLS :8888).
 hlsAlwaysRemux: true
 hlsVariant: mpegts
+# 500ms segments: 1s segments limited cam_c's preview content updates to
+# ~1/s (slideshow-like); 200ms broke the remux of the lossy RTSP feed.
+hlsSegmentDuration: 500ms
 
 paths:
   cam_a:

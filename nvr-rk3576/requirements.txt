@@ -2,3 +2,4 @@ numpy
 pyyaml
 pytest
 flask
+Pillow

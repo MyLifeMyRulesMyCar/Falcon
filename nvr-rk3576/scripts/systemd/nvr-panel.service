@@ -1,0 +1,18 @@
+[Unit]
+Description=NVR control panel (ingest, detection, previews)
+After=network-online.target nvr-testbed.service
+Wants=network-online.target
+Requires=nvr-testbed.service
+
+[Service]
+Type=simple
+User=radxa
+Group=radxa
+WorkingDirectory=/home/radxa/falcon/nvr-rk3576
+ExecStart=/home/radxa/falcon/.venv/bin/python /home/radxa/falcon/nvr-rk3576/scripts/run_control_panel.py --host 0.0.0.0
+ExecStartPost=/home/radxa/falcon/nvr-rk3576/scripts/start_cameras.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

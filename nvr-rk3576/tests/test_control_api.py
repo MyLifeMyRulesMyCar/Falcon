@@ -4,6 +4,7 @@ no real subprocesses or network."""
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -92,6 +93,7 @@ def test_list_cameras_shape_all_stopped(client):
         assert row["inference_fps"] == 0.0
         assert row["skip_ratio"] == 0.0
         assert row["last_detections"] == []
+        assert row["detection_enabled"] is True
         assert "fps" in row and "url" in row
 
 
@@ -175,6 +177,96 @@ def test_index_serves_page(client):
     assert b"control panel" in res.data
 
 
+class _FakeFrameStore:
+    def __init__(self):
+        self._data = {}
+        self._gen = {}
+
+    def set(self, name, frame):
+        self._data[name] = frame.copy()
+        self._gen[name] = self._gen.get(name, 0) + 1
+
+    def read(self, name):
+        if name not in self._data:
+            return None
+        return self._data[name].copy(), self._gen[name]
+
+    def read_view(self, name):
+        return self.read(name)
+
+
+def _frame():
+    return np.zeros((4, 8, 3), dtype=np.uint8)
+
+
+def test_stream_raw_serves_multipart_jpeg():
+    import numpy as np
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    store = _FakeFrameStore()
+    store.set("cam_a", _frame())
+    app = create_app(mgr, cameras, frame_store=store)
+    app.config["TESTING"] = True
+
+    # Drive the view function directly: the werkzeug test client consumes
+    # infinite generators during open(), so it can't be used for MJPEG.
+    with app.test_request_context():
+        resp = app.view_functions["stream_raw"]("cam_a")
+        assert "multipart/x-mixed-replace" in resp.content_type
+        chunk = next(iter(resp.response))
+        assert b"--frame" in chunk
+        assert b"Content-Type: image/jpeg" in chunk
+        assert b"\xff\xd8" in chunk  # JPEG SOI magic
+
+    with app.test_request_context():
+        resp = app.view_functions["stream_raw"]("nope")
+        assert resp[1] == 404  # (body, status, headers) tuple
+        resp = app.view_functions["stream_raw"]("cam_b")
+        assert "multipart/x-mixed-replace" in resp.content_type  # empty until written
+
+
+def test_stream_annotated_obeys_detection_flags():
+    import multiprocessing
+
+    import numpy as np
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    store = _FakeFrameStore()
+    store.set("cam_a", _frame())
+    stats = multiprocessing.Manager().dict()
+    stats["cam_a"] = {
+        "total": 1,
+        "skipped": 0,
+        "inference_fps": 9.0,
+        "skip_ratio": 0.0,
+        "last_detections": [{"class_name": "person", "confidence": 0.8, "bbox": [1, 1, 3, 3]}],
+    }
+    flags = multiprocessing.Manager().dict()
+    app = create_app(mgr, cameras, detection_stats=stats, detection_flags=flags, frame_store=store)
+    app.config["TESTING"] = True
+
+    # Detection on: annotated stream encodes without error.
+    with app.test_request_context():
+        resp = app.view_functions["stream_annotated"]("cam_a")
+        assert "multipart/x-mixed-replace" in resp.content_type
+        chunk = next(iter(resp.response))
+        assert b"\xff\xd8" in chunk
+
+    # Detection off: still serves (blank overlay), just no boxes drawn.
+    flags["cam_a"] = False
+    with app.test_request_context():
+        resp = app.view_functions["stream_annotated"]("cam_a")
+        assert "multipart/x-mixed-replace" in resp.content_type
+        chunk = next(iter(resp.response))
+        assert b"\xff\xd8" in chunk
+
+
 def test_restart_callback_fires_on_start_stop():
     from nvr.control.api import create_app
 
@@ -191,3 +283,66 @@ def test_restart_callback_fires_on_start_stop():
     assert calls == ["restart", "restart", "restart"]
     assert client.post("/api/cameras/nope/start").status_code == 404
     assert calls == ["restart", "restart", "restart"]  # unknown: no callback
+
+
+def test_detection_toggle_routes_and_enabled_field():
+    import multiprocessing
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    flags = multiprocessing.Manager().dict()
+    app = create_app(mgr, cameras, detection_flags=flags)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    rows = client.get("/api/cameras").get_json()
+    assert all(r["detection_enabled"] is True for r in rows)  # default on
+
+    assert client.post("/api/cameras/nope/detection/off").status_code == 404
+    assert client.post("/api/cameras/cam_a/detection/off").status_code == 200
+    assert flags["cam_a"] is False
+    assert client.post("/api/cameras/cam_a/detection/on").status_code == 200
+    assert flags["cam_a"] is True
+
+    client.post("/api/cameras/cam_a/detection/off")
+    rows = client.get("/api/cameras").get_json()
+    cam_a = [r for r in rows if r["name"] == "cam_a"][0]
+    assert cam_a["detection_enabled"] is False
+    assert cam_a["inference_fps"] == 0.0
+    assert cam_a["skip_ratio"] == 0.0
+    assert cam_a["last_detections"] == []
+
+
+def test_detection_off_falls_back_to_manager_frame_count():
+    import multiprocessing
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    flags = multiprocessing.Manager().dict()
+    stats = multiprocessing.Manager().dict()
+    # Stale worker counts from before the toggle; manager count is live.
+    stats["cam_a"] = {
+        "total": 100,
+        "skipped": 50,
+        "inference_fps": 9.0,
+        "skip_ratio": 0.2,
+        "last_detections": [{"class_name": "person", "confidence": 0.8}],
+    }
+    mgr.stats_data["cam_a"]["frames_received"] = 42
+    app = create_app(mgr, cameras, detection_stats=stats, detection_flags=flags)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    # Detection on: worker counts preferred (150).
+    cam_a = [r for r in client.get("/api/cameras").get_json() if r["name"] == "cam_a"][0]
+    assert cam_a["frames_received"] == 150
+
+    # Detection off: falls back to the manager's live count, not stale worker.
+    client.post("/api/cameras/cam_a/detection/off")
+    cam_a = [r for r in client.get("/api/cameras").get_json() if r["name"] == "cam_a"][0]
+    assert cam_a["frames_received"] == 42
+    assert cam_a["inference_fps"] == 0.0
