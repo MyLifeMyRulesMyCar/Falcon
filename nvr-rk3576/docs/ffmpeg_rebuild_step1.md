@@ -149,3 +149,20 @@ If the new build causes problems, the previous `/usr/local/bin/ffmpeg` binary wa
 ```bash
 sudo cp /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.bak.$(date +%s)
 ```
+
+## Fresh-board reproduction (Aug 2026)
+
+Rebuilt identically on a clean Radxa OS 6.1.84 CM4. The only extra step is the
+build dependencies (the earlier notes assume the compiler and `libssl-dev`
+are already present):
+
+```bash
+sudo apt update
+sudo apt install -y build-essential libssl-dev librockchip-mpp-dev libdrm-dev pkg-config nasm
+```
+
+`librockchip-mpp-dev` (1.5.0) and `libdrm-dev` (2.4.122) are in the Radxa
+rk3576 / Debian repos. All post-install checks match the "After the rebuild"
+section verbatim, including `-hwaccel drm` decode of the public HLS test
+stream (60 frames @ ~2.4x). On boards where ffmpeg.org stalls, fetch the
+tarball from a mirror first.

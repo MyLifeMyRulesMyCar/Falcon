@@ -28,6 +28,13 @@ tests/                    # unit tests (no network, no subprocesses)
 
 ## Testbed — 4 protocols, independently killable
 
+> **mediamtx is pinned to v1.12.2.** Newer releases (>= 1.20) crash their HLS
+> muxer on the looped h264_rkmpp sample (`unable to extract DTS: too many
+> reordered frames`), driving cam_c down to ~0-9 fps with repeated restarts.
+> The binary lives at `testbed/mediamtx` (gitignored). If the GitHub release
+> download hangs on this board, route it through the `ghproxy.net` mirror
+> (see the main README's bring-up notes).
+
 `mediamtx` serves RTSP (:8554) / RTMP (:1935) / HLS (:8888). Four publishers
 each run in their own process group (`setsid`), so any camera can be killed
 without touching the others:
@@ -42,12 +49,15 @@ without touching the others:
 > mediamtx does not serve HTTP-FLV, so cam_d's publisher is a standalone
 > ffmpeg in listen mode plus an RTSP republish into mediamtx (so the web
 > player at `http://host:8888/cam_d/` works). The listen server is wrapped
-> in a respawn loop with a watchdog that only restarts it during the first
-> 60s of its life while a client is attached (a client that dies mid-header
-> can leave the single-client server connected-but-broken; broken slots only
-> ever occur at spawn/startup churn, so long-lived healthy connections are
-> never touched). cam_d therefore shows 1-3 honest `restart_count`
-> increments at startup; it is stable afterwards.
+> in a respawn loop with a watchdog that restarts it during the publisher
+> group's first 60s of life while a client is attached and the server is
+> >= 20s old (a client that dies mid-header can leave the single-client
+> server connected-but-broken; broken slots only ever occur at spawn/startup
+> churn). The watchdog is deliberately gated to that startup window: an
+> earlier version kept firing on the long-lived healthy ingest connection,
+> so cam_d's `restart_count` climbed forever (~1 per 20s) instead of settling
+> at the documented 1-3 startup increments. cam_d therefore shows a few
+> honest `restart_count` increments at startup and is stable afterwards.
 
 Usage:
 
@@ -135,6 +145,12 @@ python scripts/run_control_panel.py          # http://127.0.0.1:5050
 | cam_d  | 53,642 | 29.9 | 3 (startup only) |
 
 Memory flat (~2.4 GB used / ~1.4 GB free on the 4 GB board).
+
+### Fresh-board reproduction (Aug 2026)
+
+All four cameras again held ~30 fps with zero steady-state restarts (90s
+observation, cam_a/b/c/d `restart_count` frozen) on a clean Radxa OS 6.1.84
+board, with mediamtx pinned to v1.12.2 and the cam_d watchdog gated as above.
 
 ### CPU budget for M2 (measured, /proc stat deltas over a stable window)
 

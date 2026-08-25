@@ -290,12 +290,22 @@ class StreamWorker(multiprocessing.Process):
 
 def _drain_stderr(proc: subprocess.Popen, lines: list[str]) -> None:
     """Read ffmpeg stderr to a bounded line buffer so the pipe never fills."""
-    for line in proc.stderr:
-        decoded = line.decode(errors="replace").strip()
-        lines.append(decoded)
-        if len(lines) > 20:
-            lines.pop(0)
-    proc.stderr.close()
+    try:
+        for line in proc.stderr:
+            decoded = line.decode(errors="replace").strip()
+            lines.append(decoded)
+            if len(lines) > 20:
+                lines.pop(0)
+    except (ValueError, OSError) as exc:
+        # CPython 3.11 can raise PyMemoryView_FromBuffer from BufferedReader
+        # when a subprocess pipe read races the process exit; the process is
+        # ending anyway, so treat it as end-of-stream.
+        log.debug("camera stderr drain stopped: %s", exc)
+    finally:
+        try:
+            proc.stderr.close()
+        except OSError:
+            pass
 
 
 def _terminate(proc: subprocess.Popen) -> None:

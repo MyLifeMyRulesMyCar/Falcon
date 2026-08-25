@@ -55,6 +55,7 @@ echo $! > cam_c.pid
 # ever occur at spawn/startup churn; a long-lived healthy connection is
 # never touched). The whole group is killed via the PID file.
 setsid sh -c '
+    PUB_START=$(date +%s); \
     ffmpeg -loglevel error -re -stream_loop -1 -i sample.mp4 \
         -c copy -f rtsp rtsp://127.0.0.1:8554/cam_d \
         > /dev/null 2>&1 &
@@ -65,7 +66,11 @@ setsid sh -c '
         START=$(date +%s); \
         while kill -0 $SRV 2>/dev/null; do \
             NOW=$(date +%s); \
-            if [ $(( NOW - START )) -ge 20 ] && [ $(( NOW - START )) -lt 60 ] && \
+            # Watchdog only during the publisher group'\''s first 60s (spawn/
+            # startup churn is where broken slots appear); a long-lived healthy
+            # connection in steady state is never touched.
+            if [ $(( NOW - PUB_START )) -lt 60 ] && \
+               [ $(( NOW - START )) -ge 20 ] && \
                ss -tn 2>/dev/null | grep -q "ESTAB.*127.0.0.1:8080"; then \
                 kill $SRV 2>/dev/null; \
             fi; \

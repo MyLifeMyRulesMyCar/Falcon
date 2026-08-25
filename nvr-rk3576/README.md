@@ -15,8 +15,13 @@ Multi-camera NVR ingest layer for Radxa CM4 (RK3576).
 ## Requirements
 
 - RK3576 board with the Rockchip MPP kernel driver (`/dev/mpp_service`)
+- NPU reachable through the **DRM render node**: on Radxa OS 6.1 there is no
+  `/dev/rknpu` — the kernel registers the NPU as a DRM device
+  (`CONFIG_ROCKCHIP_RKNPU_DRM_GEM=y`, driver 0.9.8) and librknnrt opens
+  `/dev/dri/renderD129` on its own. See "Fresh-board bring-up notes".
 - ffmpeg/ffprobe built with `--enable-rkmpp` and `--enable-openssl`
-- Python 3.11 venv with `numpy`, `pyyaml`, `pytest`, `flask`
+- Python 3.11 venv with `numpy`, `pyyaml`, `pytest`, `flask` and
+  `rknn-toolkit-lite2==2.3.2` (the system `python3-rknnlite2` 2.3.0 works too)
 
 > **Note on `rkmpp` hardware acceleration:** upstream ffmpeg exposes rkmpp as
 > hardware *decoders* (`h264_rkmpp`, `hevc_rkmpp`, etc.), not as a `hwaccel`
@@ -63,6 +68,49 @@ ffmpeg -decoders | grep rkmpp      # h264_rkmpp, hevc_rkmpp, ...
 ffmpeg -protocols | grep https      # https, tls
 ffprobe https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
 ```
+
+## Fresh-board bring-up notes (Radxa OS 6.1.84, reproduced Aug 2026)
+
+Things that are easy to trip over on a clean board, all verified here:
+
+- **NPU device node.** This kernel registers the RKNPU driver as a *DRM*
+  device (`[drm] Initialized rknpu 0.9.8 ... on minor 1`) because
+  `CONFIG_ROCKCHIP_RKNPU_DRM_GEM=y`. There is **no `/dev/rknpu`**, no misc
+  device, and no udev rule to write. librknnrt >= 2.3.0 finds the NPU through
+  `/dev/dri/renderD129` (group `render`) on its own. Confirm the stack with
+  the C demo before touching Python:
+  ```bash
+  cd ~/rk3576_rknn_yolov5_demo && ./rknn_yolov5_demo \
+      ./model/yolov5s_relu_rk3576.rknn ./model/bus.jpg
+  # expect the 5 ground-truth detections: person 0.880/0.871/0.832, bus 0.705, person 0.301
+  ```
+- **Model + calibration asset.** `nvr/inference/model/*.rknn` is gitignored.
+  Get it from the Radxa demo tarball (which also provides `bus.jpg` —
+  `scripts/verify_detector_m2.py` reads it from `~/rk3576_rknn_yolov5_demo/model/`):
+  ```bash
+  curl -sL -o /tmp/rk3576_rknn_yolov5_demo.tar.gz \
+      https://dl.radxa.com/rock4/4d/images/rk3576_rknn_yolov5_demo.tar.gz
+  tar -xzf /tmp/rk3576_rknn_yolov5_demo.tar.gz -C ~/
+  mkdir -p nvr/inference/model && cp \
+      ~/rk3576_rknn_yolov5_demo/model/yolov5s_relu_rk3576.rknn \
+      nvr/inference/model/
+  ```
+- **mediamtx: pin v1.12.2.** The testbed binary is `testbed/mediamtx`
+  (gitignored). The current release (v1.20.x) crashes its HLS muxer on the
+  looped h264_rkmpp sample (`unable to extract DTS: too many reordered
+  frames`), dragging cam_c down to ~0-9 fps with repeated restarts. v1.12.2
+  keeps all four cameras at ~30 fps / 0 restarts.
+- **Network quirks on this board.** GitHub *release-asset* downloads (Azure
+  blob) and Google-hosted endpoints (proxy.golang.org, go.dev/dl) stall
+  mid-transfer, while GitHub API/codeload, PyPI, ffmpeg.org, dl.radxa.com and
+  the Debian mirrors are fine. If a release download hangs, route it through
+  a mirror, e.g.
+  `curl -L -o mediamtx.tar.gz https://ghproxy.net/https://github.com/bluenviron/mediamtx/releases/download/v1.12.2/mediamtx_v1.12.2_linux_arm64.tar.gz`
+- **Paths / venv.** The docs and systemd units assume the repo lives at
+  `/home/radxa/falcon/...`. On this machine it is `/home/radxa/Falcon`,
+  bridged with `ln -s /home/radxa/Falcon /home/radxa/falcon`. The venv sits
+  at the repo root (`/home/radxa/Falcon/.venv`, gitignored) so the systemd
+  `ExecStart` paths and `scripts/run_panel.sh` work as written.
 
 ## Configuration
 
@@ -158,6 +206,9 @@ Verified on the board:
 
 - 4 cameras over RTSP / RTMP / HLS / HTTP-FLV, each independently killable
   and recoverable without touching the others.
+- Reproduced on a fresh board (Aug 2026): all four cameras hold ~30 fps with
+  zero steady-state restarts — mediamtx is pinned to **v1.12.2** (v1.20.x's
+  strict HLS muxer crashes on the looped h264_rkmpp sample; see bring-up notes).
 - 30-min soak: 53k frames per camera at ~30 fps, `restarts: 0`, memory flat.
 - CPU budget for M2: ~63% of one core for 4x 640x360 decode+colorspace
   (~2.4 cores projected for 4x 720p); Python ingest stack ~1.5 cores.
@@ -176,7 +227,10 @@ NPU core) run the detector. The panel shows per-camera `infer fps`,
   (~1.8x); 4-camera combined ~12/s, capped by ingest demand, not NPU.
 - True ingest (decoder-counted) stays ~25-30 fps with detection active —
   the earlier "ingest regression" was a metric artifact.
-- pytest: 57 passed. Details + full measurements in `docs/m2_detection.md`.
+- pytest: 72 passed (the suite grew since the 57 in the M2 write-up).
+- Fresh-board reproduction (Aug 2026): identical bus.jpg gate score 0.029;
+  live panel holds all four cameras at ~30 fps true ingest with zero
+  steady-state restarts and per-camera infer ~12-20 fps (combined ~16-18/s).
 
 ## Control panel (M1.1)
 

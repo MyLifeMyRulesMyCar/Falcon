@@ -33,6 +33,12 @@ tests/
 - NPU confirmed working: `CONFIG_ROCKCHIP_RKNPU=y`, dmesg `RKNPU 27700000.npu`,
   driver 0.9.8; the demo's `librknnrt.so` is 2.3.2; `rknn-toolkit-lite2 2.3.2`
   installed in the venv (bundles runtime 2.3.0 — works).
+- **There is no `/dev/rknpu` on Radxa OS 6.1.** The kernel registers the NPU as
+  a DRM device (`CONFIG_ROCKCHIP_RKNPU_DRM_GEM=y`, `[drm] Initialized rknpu
+  0.9.8 ... on minor 1`), so the runtime reaches it through the render node
+  `/dev/dri/renderD129` (group `render`). Verified with the pip 2.3.2 wheel and
+  with the Radxa system packages `python3-rknnlite2` 2.3.0 + `rknpu2-rk3588`.
+  Do not chase a missing `/dev/rknpu` — there is no udev rule to add either.
 - `inspect_model.py` (zeros 640x640 frame): outputs
   `(1,255,80,80) / (1,255,40,40) / (1,255,20,20)`, **dtype=float32** — the
   runtime dequantizes; no zero-point math needed in Python.
@@ -133,8 +139,11 @@ DetectionWorker (one process; owns both NPU cores)
 
 ```
 pytest tests/ -q
-57 passed
+72 passed
 ```
+
+- 72 passed on the fresh-board rerun (Aug 2026) — the suite has grown since
+  the 57 in the original M2.3 write-up.
 
 - `test_motion_gate.py` (5): identical frames skip; synthetic bright block
   triggers; below-threshold change does not; skip-counter forces a pass
@@ -159,6 +168,11 @@ pytest tests/ -q
 (Per-camera `infer fps` is per-inference speed (1/mean elapsed), not
 per-camera cadence; cadence = combined/N. cam_a/cam_d are the local
 testbed with the Big Buck Bunny clip; cam_b/cam_c are public VOD streams.)
+
+Fresh-board reproduction (Aug 2026): the calibration table above is unchanged
+(score 0.029); the live-panel run used all four *local* testbed cameras and
+held ~25-30 fps true ingest, infer ~12-20 fps, combined ~16-18/s, with zero
+steady-state restarts.
 
 ## Known limitations / next levers
 
