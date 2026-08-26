@@ -42,19 +42,32 @@ def main() -> None:
     )  # cameras start stopped
     stats = multiprocessing.Manager().dict()
     detection_flags = multiprocessing.Manager().dict()
-    worker = DetectionWorker(list(cameras), manager, stats, detection_flags)
+
+    # Fresh on every call: cameras are renamed/edited live, so zones must be
+    # recomputed from the current dict whenever a worker/encoder re-forks.
+    def current_zone_configs() -> dict:
+        return {name: c.zones for name, c in cameras.items()}
+
+    worker = DetectionWorker(
+        list(cameras), manager, stats, detection_flags, current_zone_configs()
+    )
     worker.start()
 
     # Dedicated preview encoders: all JPEG work leaves the panel's threads.
     # Two processes (2 cameras each), each pinned to its own A72 core, so
     # the encode load can't be preempted into jitter.
     slots = make_slots(list(cameras))
-    names = list(cameras)
-    half = len(names) // 2
-    encoders = [
-        PreviewEncoder(names[:half], frame_store, slots, stats, detection_flags, a72_cores={4, 5}),
-        PreviewEncoder(names[half:], frame_store, slots, stats, detection_flags, a72_cores={6, 7}),
-    ]
+
+    def spawn_encoders() -> list:
+        names = list(cameras)
+        half = len(names) // 2
+        zones = current_zone_configs()
+        return [
+            PreviewEncoder(names[:half], frame_store, slots, stats, detection_flags, a72_cores={4, 5}, zones=zones),
+            PreviewEncoder(names[half:], frame_store, slots, stats, detection_flags, a72_cores={6, 7}, zones=zones),
+        ]
+
+    encoders = spawn_encoders()
     for enc in encoders:
         enc.start()
         atexit.register(enc.terminate)
@@ -65,8 +78,22 @@ def main() -> None:
         nonlocal worker
         worker.terminate()
         worker.join(timeout=5)
-        worker = DetectionWorker(list(cameras), manager, stats, detection_flags)
+        worker = DetectionWorker(
+            list(cameras), manager, stats, detection_flags, current_zone_configs()
+        )
         worker.start()
+
+    def restart_encoders() -> None:
+        """Re-fork the PreviewEncoders so zone/name/url edits take effect
+        (the encoder holds zones at construction time, like the worker)."""
+        nonlocal encoders
+        for enc in encoders:
+            enc.terminate()
+            enc.join(timeout=5)
+        encoders = spawn_encoders()
+        for enc in encoders:
+            enc.start()
+            atexit.register(enc.terminate)
 
     app = create_app(
         manager,
@@ -76,6 +103,8 @@ def main() -> None:
         detection_flags=detection_flags,
         frame_store=frame_store,
         preview_slots=slots,
+        restart_encoders=restart_encoders,
+        config_path=args.config,
     )
     print(f"control panel: http://{args.host}:{args.port}  ({len(cameras)} cameras)")
     app.run(host=args.host, port=args.port, threaded=True)

@@ -12,7 +12,7 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 from PIL import Image
 
-from nvr.config import CameraConfig
+from nvr.config import CameraConfig, ConfigError, parse_zones, write_config
 from nvr.control.preview_encoder import preview_encode, read_slot
 from nvr.ingest.manager import IngestManager
 
@@ -26,6 +26,28 @@ _JPEG_SERVE_INTERVAL = 0.16
 _DRAIN_INTERVAL = 0.005
 
 
+def _zone_to_dict(z) -> dict:
+    """JSON-safe ZoneConfig -> dict (same shape as config.yaml zones)."""
+    return {
+        "name": z.name,
+        "polygon": [[float(x), float(y)] for x, y in z.polygon],
+        "trigger_classes": list(z.trigger_classes),
+        "dwell_time_sec": z.dwell_time_sec,
+        "cooldown_sec": z.cooldown_sec,
+    }
+
+
+def _camera_dims(frame_store, name: str):
+    """Native (width, height) from the frame store, or ``None`` (never
+    published / absent frame_store / test doubles without ``dims``)."""
+    if frame_store is None:
+        return None
+    try:
+        return frame_store.dims(name)
+    except Exception:
+        return None
+
+
 def create_app(
     manager: IngestManager,
     cameras: dict[str, CameraConfig],
@@ -34,6 +56,8 @@ def create_app(
     detection_flags: Optional[dict] = None,
     frame_store=None,
     preview_slots=None,
+    restart_encoders: Optional[callable] = None,
+    config_path: Optional[str] = None,
 ) -> Flask:
     """Build the Flask app. ``cameras`` is the live name->config dict the
     panel edits; the manager must own the same CameraConfig objects.
@@ -49,7 +73,11 @@ def create_app(
     ``preview_slots`` are the PreviewEncoder's per-camera JPEG slots;
     when provided, the stream generators serve the pre-encoded bytes with
     zero in-process encode work (fallback to in-process encoding otherwise,
-    which tests use)."""
+    which tests use).
+    ``restart_encoders`` re-forks the PreviewEncoder processes (called after
+    zone or name/url edits so the encoder picks up the new config).
+    ``config_path`` persists name/url/zones edits to config.yaml when set
+    (optional; absent for tests -> edits stay in-memory only)."""
     app = Flask(__name__, static_url_path="/static")
     detection_stats = detection_stats if detection_stats is not None else {}
     detection_flags = detection_flags if detection_flags is not None else {}
@@ -104,7 +132,10 @@ def create_app(
         next_serve = 0.0
         while True:
             if preview_slots is not None:
-                kind = "ann" if annotated and boxes_present(name) else "raw"
+                # The annotated slot is also used when the camera has zones,
+                # so the zone outline is visible even without detections.
+                has_zones = bool(cameras[name].zones)
+                kind = "ann" if annotated and (boxes_present(name) or has_zones) else "raw"
                 jpg, g = read_slot(preview_slots, name, kind)
                 if not jpg:
                     time.sleep(0.1)
@@ -129,13 +160,17 @@ def create_app(
             if cached is not None and cached[0] == gen:
                 jpg = cached[1]
             else:
+                draw_ann = annotated and (boxes_present(name) or bool(cameras[name].zones))
                 boxes = None
-                if annotated and boxes_present(name):
-                    boxes = [
-                        d.get("bbox", (0, 0, 0, 0))
-                        for d in detection_stats[name]["last_detections"]
-                    ]
-                jpg = preview_encode(frame_view, boxes=boxes)
+                zones = None
+                if draw_ann:
+                    if boxes_present(name):
+                        boxes = [
+                            d.get("bbox", (0, 0, 0, 0))
+                            for d in detection_stats[name]["last_detections"]
+                        ]
+                    zones = [(z.polygon, z.name) for z in cameras[name].zones]
+                jpg = preview_encode(frame_view, boxes=boxes, zones=zones)
                 encode_cache[f"{annotated}:{name}"] = (gen, jpg)
             yield (
                 b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
@@ -199,9 +234,63 @@ def create_app(
                     "inference_fps": round(infer_fps, 1),
                     "skip_ratio": round(skip_ratio, 2),
                     "last_detections": d.get("last_detections", []) if detection_enabled else [],
+                    "zones": [z.name for z in cfg.zones],
+                    "recent_zone_events": d.get("recent_zone_events", []),
+                    "width": (_camera_dims(frame_store, name) or (None, None))[0],
+                    "height": (_camera_dims(frame_store, name) or (None, None))[1],
                 }
             )
         return jsonify(rows)
+
+    @app.get("/api/cameras/<name>/zones")
+    def get_zones(name: str):
+        """Full zone configs + native dimensions for the zone editor."""
+        if name not in cameras:
+            return jsonify({"error": f"unknown camera: {name}"}), 404
+        dims = _camera_dims(frame_store, name) or (None, None)
+        return jsonify(
+            {
+                "width": dims[0],
+                "height": dims[1],
+                "zones": [_zone_to_dict(z) for z in cameras[name].zones],
+            }
+        )
+
+    @app.put("/api/cameras/<name>/zones")
+    def set_zones(name: str):
+        """Replace a camera's zones (bulk, same shape as config.yaml)."""
+        if name not in cameras:
+            return jsonify({"error": f"unknown camera: {name}"}), 404
+        body = request.get_json(silent=True)
+        if not isinstance(body, list):
+            return jsonify({"error": "body must be a list of zone configs"}), 400
+        try:
+            parsed = parse_zones(body, name)
+        except ConfigError as exc:
+            return jsonify({"error": str(exc)}), 400
+        old = cameras[name].zones
+        cameras[name].zones = parsed
+        if config_path:
+            try:
+                write_config(config_path, list(cameras.values()))
+            except (ConfigError, OSError) as exc:
+                cameras[name].zones = old  # revert
+                return jsonify({"error": f"failed to persist config: {exc}"}), 500
+        if restart_detection is not None:
+            restart_detection()
+        if restart_encoders is not None:
+            restart_encoders()
+        return jsonify([_zone_to_dict(z) for z in cameras[name].zones])
+
+    @app.get("/api/zone_events")
+    def zone_events():
+        """Flattened zone events, most-recent-first across all cameras."""
+        events = []
+        for name in cameras:
+            for ev in detection_stats.get(name, {}).get("recent_zone_events", []):
+                events.append(ev)
+        events.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
+        return jsonify(events[:50])
 
     @app.post("/api/cameras/<name>/start")
     def start_camera(name: str):
@@ -248,7 +337,20 @@ def create_app(
             return jsonify({"error": "body must be {'name': str, 'url': str}"}), 400
         if not isinstance(new_url, str) or not new_url.strip():
             return jsonify({"error": "body must be {'name': str, 'url': str}"}), 400
-        new_config = CameraConfig(name=new_name.strip(), url=new_url.strip())
+        new_name, new_url = new_name.strip(), new_url.strip()
+        # Zones carry across a rename; only name/url are edited here.
+        new_config = CameraConfig(name=new_name, url=new_url, zones=cameras[name].zones)
+        # Check liveness before persisting so a write failure can't leave a
+        # stale config next to a live manager (stubs without is_alive fall
+        # back to manager.update_camera's RuntimeError below).
+        if getattr(manager, "is_alive", lambda n: False)(name):
+            return jsonify({"error": "stop the camera before editing"}), 409
+        if config_path:
+            prospective = [new_config if c.name == name else c for c in cameras.values()]
+            try:
+                write_config(config_path, prospective)
+            except (ConfigError, OSError) as exc:
+                return jsonify({"error": f"failed to persist config: {exc}"}), 500
         try:
             manager.update_camera(name, new_config)
         except RuntimeError:
@@ -257,6 +359,8 @@ def create_app(
         cameras[new_name] = new_config
         if restart_detection is not None:
             restart_detection()
+        if restart_encoders is not None:
+            restart_encoders()
         return jsonify({"name": new_name, "url": body["url"]})
 
     return app

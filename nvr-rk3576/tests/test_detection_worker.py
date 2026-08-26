@@ -110,3 +110,33 @@ def test_update_stats_caps_detections_at_three():
     stats = _update_stats(None, elapsed=0.1, detections=detections, skipped=False)
 
     assert len(stats["last_detections"]) == 3
+
+
+def test_update_stats_caps_zone_events_ring():
+    stats = None
+    for i in range(25):
+        ev = {
+            "camera": "cam_a",
+            "zone": "entry_path",
+            "track_id": i,
+            "class_name": "person",
+            "dwell_time_sec": 2.0,
+            "bbox_xyxy": [0, 0, 1, 1],
+            "timestamp": float(i),
+        }
+        stats = _update_stats(
+            stats,
+            elapsed=0.1,
+            detections=[{"class_name": "person", "confidence": 0.8}],
+            skipped=False,
+            zone_events=[ev],
+        )
+
+    assert len(stats["recent_zone_events"]) == 20
+    assert stats["recent_zone_events"][0]["track_id"] == 5  # first five dropped
+    assert stats["recent_zone_events"][-1]["track_id"] == 24
+
+
+def test_update_stats_no_zone_events_has_empty_ring():
+    stats = _update_stats(None, elapsed=0.1, detections=[], skipped=False)
+    assert stats["recent_zone_events"] == []

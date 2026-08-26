@@ -16,6 +16,18 @@
   .stopped { background: #5c1d1d; }
   .note { color: #888; font-size: 0.85em; }
   .error { color: #ff8080; font-size: 0.85em; }
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+           display: flex; align-items: center; justify-content: center; z-index: 10; }
+  .modal-box { background: #1a1a1a; border: 1px solid #444; padding: 14px;
+               max-width: 720px; width: 100%; max-height: 92vh; overflow: auto; }
+  .zone-stage { position: relative; margin: 8px 0; background: #000; }
+  .zone-stage img, .zone-stage canvas { display: block; }
+  .zone-stage canvas { position: absolute; left: 0; top: 0; }
+  .zone-toolbar { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  .zone-edit { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0; }
+  .zone-edit label { display: flex; flex-direction: column; font-size: 0.85em; color: #aaa; }
+  .zone-edit input { width: 120px; background: #1a1a1a; color: #ddd;
+                     border: 1px solid #444; padding: 3px; }
 </style>
 </head>
 <body>
@@ -26,12 +38,38 @@
     <tr>
       <th>name</th><th>url</th><th></th><th></th><th></th><th></th><th></th>
       <th>status</th><th>fps</th><th>frames</th><th>restarts</th>
-      <th>infer fps</th><th>skip%</th><th>detections</th><th>preview</th>
+      <th>infer fps</th><th>skip%</th><th>detections</th><th>zone events</th><th>preview</th>
     </tr>
   </thead>
   <tbody></tbody>
 </table>
 <p class="error" id="global-error"></p>
+
+<div id="zone-modal" class="modal" style="display:none">
+  <div class="modal-box">
+    <h2 id="zone-title">Zones</h2>
+    <div class="zone-stage">
+      <img id="zone-img" alt="">
+      <canvas id="zone-canvas"></canvas>
+    </div>
+    <div class="zone-toolbar">
+      <button id="zone-new">New zone</button>
+      <button id="zone-finish">Finish polygon</button>
+      <button id="zone-delete">Delete zone</button>
+      <span id="zone-status" class="note"></span>
+    </div>
+    <div class="zone-edit">
+      <label>name <input id="zone-edit-name" type="text"></label>
+      <label>classes (comma) <input id="zone-edit-classes" type="text"></label>
+      <label>dwell (s) <input id="zone-edit-dwell" type="number" min="0" step="0.1"></label>
+      <label>cooldown (s) <input id="zone-edit-cooldown" type="number" min="0" step="0.1"></label>
+    </div>
+    <div class="zone-toolbar">
+      <button id="zone-save">Save zones</button>
+      <button id="zone-close">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -118,6 +156,10 @@ function row(cam) {
   watchLink.href = "http://" + location.hostname + ":8888/" + cam.name + "/";
   watchLink.target = "_blank";
 
+  const zonesBtn = document.createElement("button");
+  zonesBtn.textContent = "zones";
+  zonesBtn.onclick = () => openZoneEditor(cam);
+
   const badge = document.createElement("span");
   badge.className = "badge " + (running ? "running" : "stopped");
   badge.textContent = running ? "running" : "stopped";
@@ -142,6 +184,7 @@ function row(cam) {
   detectTd.appendChild(detectBtn);
   const watchTd = document.createElement("td");
   watchTd.appendChild(watchLink);
+  watchTd.appendChild(zonesBtn);
 
   const statusTd = document.createElement("td");
   statusTd.appendChild(badge);
@@ -162,13 +205,20 @@ function row(cam) {
     .map((d) => d.class_name + ":" + d.confidence)
     .join(", ");
 
+  const zoneTd = document.createElement("td");
+  zoneTd.className = "note";
+  zoneTd.textContent = (cam.recent_zone_events || [])
+    .slice(-2)
+    .map((e) => e.zone + ":" + e.class_name)
+    .join(", ");
+
   const prevTd = previewCell(cam);
 
   const errorTd = document.createElement("td");
   errorTd.colSpan = 15;
   errorTd.className = "error";
 
-  tr.append(nameTd, urlTd, saveTd, startTd, stopTd, detectTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, inferTd, skipTd, detTd, prevTd, note);
+  tr.append(nameTd, urlTd, saveTd, startTd, stopTd, detectTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, inferTd, skipTd, detTd, zoneTd, prevTd, note);
   tr.appendChild(errorTd);
 
   const act = (url, opts, after) => {
@@ -261,6 +311,261 @@ function refresh() {
 
 refresh();
 setInterval(refresh, 2000);
+
+/* ---------- M4.1 zone editor (Frigate-style) ---------- */
+const zoneModal = document.getElementById("zone-modal");
+const zoneTitle = document.getElementById("zone-title");
+const zoneImg = document.getElementById("zone-img");
+const zoneCanvas = document.getElementById("zone-canvas");
+const zoneStatus = document.getElementById("zone-status");
+const zoneNew = document.getElementById("zone-new");
+const zoneFinish = document.getElementById("zone-finish");
+const zoneDelete = document.getElementById("zone-delete");
+const zoneSave = document.getElementById("zone-save");
+const zoneClose = document.getElementById("zone-close");
+const edName = document.getElementById("zone-edit-name");
+const edClasses = document.getElementById("zone-edit-classes");
+const edDwell = document.getElementById("zone-edit-dwell");
+const edCooldown = document.getElementById("zone-edit-cooldown");
+const zctx = zoneCanvas.getContext("2d");
+
+const EDIT_W = 640, EDIT_H_MAX = 560;
+const ed = { camera: null, width: 0, height: 0, scale: 1,
+             zones: [], selected: null, draft: [], drawing: false, drag: null };
+
+function openZoneEditor(cam) {
+  ed.camera = cam;
+  ed.zones = []; ed.selected = null; ed.draft = []; ed.drawing = false; ed.drag = null;
+  zoneTitle.textContent = "Zones — " + cam.name;
+  zoneStatus.textContent = "";
+  zoneModal.style.display = "flex";
+  zoneImg.removeAttribute("src");
+  fetch("/api/cameras/" + encodeURIComponent(cam.name) + "/zones")
+    .then((res) => res.json())
+    .then((data) => {
+      ed.width = data.width || 0;
+      ed.height = data.height || 0;
+      ed.zones = (data.zones || []).map((z) => ({
+        ...z,
+        polygon: z.polygon.map((p) => ({ x: p[0], y: p[1] })),
+      }));
+      setupStage();
+      if (!ed.width || !ed.height) {
+        zoneStatus.textContent = "no frames yet — start the camera to draw zones";
+      }
+      syncZoneForm(); redrawZones();
+    })
+    .catch((e) => { zoneStatus.textContent = "cannot load zones: " + e; });
+}
+
+function setupStage() {
+  if (!ed.width || !ed.height) return;
+  const scale = Math.min(EDIT_W / ed.width, EDIT_H_MAX / ed.height);
+  const cw = Math.round(ed.width * scale);
+  const ch = Math.round(ed.height * scale);
+  ed.scale = scale;
+  zoneCanvas.width = cw;
+  zoneCanvas.height = ch;
+  zoneImg.width = cw;
+  zoneImg.height = ch;
+  if (ed.camera) zoneImg.src = "/stream/" + ed.camera.name + ".mjpg";
+}
+
+function closeZoneEditor() {
+  zoneModal.style.display = "none";
+  zoneImg.removeAttribute("src");
+  refresh();
+}
+
+function toNative(e) {
+  const r = zoneCanvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / ed.scale, y: (e.clientY - r.top) / ed.scale };
+}
+
+function drawZonePoly(pts, fill, stroke, lw) {
+  if (pts.length < 2) return;
+  zctx.beginPath();
+  zctx.moveTo(pts[0].x * ed.scale, pts[0].y * ed.scale);
+  for (let i = 1; i < pts.length; i++) zctx.lineTo(pts[i].x * ed.scale, pts[i].y * ed.scale);
+  if (pts.length > 2) zctx.closePath();
+  if (fill) { zctx.fillStyle = fill; zctx.fill(); }
+  zctx.strokeStyle = stroke;
+  zctx.lineWidth = lw;
+  zctx.stroke();
+}
+
+function redrawZones() {
+  zctx.clearRect(0, 0, zoneCanvas.width, zoneCanvas.height);
+  ed.zones.forEach((z, i) => {
+    const sel = i === ed.selected;
+    drawZonePoly(z.polygon, "rgba(0,255,255,0.10)", sel ? "#ffa500" : "#00ffff", sel ? 3 : 2);
+    zctx.fillStyle = sel ? "#ffa500" : "#00ffff";
+    zctx.font = "12px monospace";
+    zctx.fillText(z.name, z.polygon[0].x * ed.scale + 4, z.polygon[0].y * ed.scale - 4);
+    if (sel) {
+      z.polygon.forEach((p) => {
+        zctx.beginPath();
+        zctx.arc(p.x * ed.scale, p.y * ed.scale, 5, 0, Math.PI * 2);
+        zctx.fillStyle = "#ffa500";
+        zctx.fill();
+      });
+    }
+  });
+  if (ed.draft.length) {
+    drawZonePoly(ed.draft, "rgba(255,165,0,0.15)", "#ffa500", 1);
+    ed.draft.forEach((p) => {
+      zctx.beginPath();
+      zctx.arc(p.x * ed.scale, p.y * ed.scale, 4, 0, Math.PI * 2);
+      zctx.fillStyle = "#ffa500";
+      zctx.fill();
+    });
+  }
+}
+
+function pointInZonePoly(poly, p) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if ((yi > p.y) !== (yj > p.y) && p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function hitTestZone(p) {
+  for (let i = ed.zones.length - 1; i >= 0; i--) {
+    if (pointInZonePoly(ed.zones[i].polygon, p)) return i;
+  }
+  return null;
+}
+
+function nearZoneVertex(zoneIdx, p) {
+  const t = 10 / ed.scale;
+  const poly = ed.zones[zoneIdx].polygon;
+  for (let i = 0; i < poly.length; i++) {
+    if (Math.abs(poly[i].x - p.x) <= t && Math.abs(poly[i].y - p.y) <= t) return i;
+  }
+  return null;
+}
+
+zoneCanvas.addEventListener("mousedown", (e) => {
+  if (!ed.width) return;
+  const p = toNative(e);
+  if (ed.drawing) {
+    ed.draft.push(p);
+    redrawZones();
+    return;
+  }
+  if (ed.selected !== null) {
+    const vi = nearZoneVertex(ed.selected, p);
+    if (vi !== null) { ed.drag = { type: "vertex", vi: vi }; return; }
+    if (pointInZonePoly(ed.zones[ed.selected].polygon, p)) {
+      ed.drag = { type: "move", sx: p.x, sy: p.y,
+                  orig: ed.zones[ed.selected].polygon.map((v) => ({ ...v })) };
+      return;
+    }
+  }
+  ed.selected = hitTestZone(p);
+  zoneStatus.textContent = ed.selected === null
+    ? "click a zone to edit it, or New zone to draw"
+    : "";
+  syncZoneForm();
+  redrawZones();
+});
+
+zoneCanvas.addEventListener("mousemove", (e) => {
+  if (!ed.drag || ed.selected === null) return;
+  const p = toNative(e);
+  const z = ed.zones[ed.selected];
+  if (ed.drag.type === "vertex") {
+    z.polygon[ed.drag.vi] = { x: p.x, y: p.y };
+  } else {
+    const dx = p.x - ed.drag.sx, dy = p.y - ed.drag.sy;
+    z.polygon = ed.drag.orig.map((v) => ({ x: v.x + dx, y: v.y + dy }));
+  }
+  redrawZones();
+});
+
+window.addEventListener("mouseup", () => { ed.drag = null; });
+
+function syncZoneForm() {
+  const z = ed.selected === null ? null : ed.zones[ed.selected];
+  edName.value = z ? z.name : "";
+  edClasses.value = z ? (z.trigger_classes || []).join(", ") : "";
+  edDwell.value = z ? z.dwell_time_sec : "";
+  edCooldown.value = z ? z.cooldown_sec : "";
+}
+
+[edName, edClasses, edDwell, edCooldown].forEach((el, i) => {
+  el.addEventListener("input", () => {
+    const z = ed.selected === null ? null : ed.zones[ed.selected];
+    if (!z) return;
+    if (i === 0) z.name = el.value.trim();
+    else if (i === 1) z.trigger_classes = el.value.split(",").map((s) => s.trim()).filter(Boolean);
+    else if (i === 2) z.dwell_time_sec = parseFloat(el.value) || 0;
+    else z.cooldown_sec = parseFloat(el.value) || 0;
+    redrawZones();
+  });
+});
+
+zoneNew.onclick = () => {
+  if (!ed.width || !ed.height) { zoneStatus.textContent = "start the camera first"; return; }
+  ed.drawing = true;
+  ed.draft = [];
+  zoneStatus.textContent = "click on the frame to place vertices (at least 3)";
+};
+
+zoneFinish.onclick = () => {
+  if (!ed.drawing) return;
+  if (ed.draft.length < 3) { zoneStatus.textContent = "a zone needs at least 3 points"; return; }
+  ed.zones.push({
+    name: "zone_" + (ed.zones.length + 1),
+    polygon: ed.draft.slice(),
+    trigger_classes: [],
+    dwell_time_sec: 2.0,
+    cooldown_sec: 30,
+  });
+  ed.selected = ed.zones.length - 1;
+  ed.drawing = false;
+  ed.draft = [];
+  syncZoneForm();
+  redrawZones();
+  zoneStatus.textContent = "edit name/classes/dwell/cooldown, then Save zones";
+};
+
+zoneDelete.onclick = () => {
+  if (ed.selected === null) { zoneStatus.textContent = "select a zone to delete"; return; }
+  ed.zones.splice(ed.selected, 1);
+  ed.selected = null;
+  syncZoneForm();
+  redrawZones();
+};
+
+zoneSave.onclick = () => {
+  if (!ed.camera) return;
+  const payload = ed.zones.map((z) => ({
+    name: z.name,
+    polygon: z.polygon.map((p) => [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10]),
+    trigger_classes: z.trigger_classes,
+    dwell_time_sec: z.dwell_time_sec,
+    cooldown_sec: z.cooldown_sec,
+  }));
+  fetch("/api/cameras/" + encodeURIComponent(ed.camera.name) + "/zones", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || ("HTTP " + res.status));
+      }
+      closeZoneEditor();
+    })
+    .catch((err) => { zoneStatus.textContent = "save failed: " + err.message; });
+};
+
+zoneClose.onclick = closeZoneEditor;
+
 </script>
 </body>
 </html>

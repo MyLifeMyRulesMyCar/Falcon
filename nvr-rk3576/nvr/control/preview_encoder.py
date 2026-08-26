@@ -19,7 +19,7 @@ import time
 from typing import Optional
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from nvr.ingest.frame_broadcast import LatestFrameStore
 
@@ -67,8 +67,8 @@ def _put_slot(slots: dict, name: str, kind: str, jpg: bytes) -> None:
     gen.value += 1
 
 
-def preview_encode(frame_bgr: np.ndarray, boxes=None) -> bytes:
-    """Stride-downscale to 320-wide with numpy, draw scaled boxes, encode.
+def preview_encode(frame_bgr: np.ndarray, boxes=None, zones=None) -> bytes:
+    """Stride-downscale to 320-wide with numpy, draw scaled boxes/zones, encode.
 
     The preview <img> renders at ~160px, so 320-wide is visually identical
     while costing ~4x less encode CPU — the difference between the encoder
@@ -77,6 +77,10 @@ def preview_encode(frame_bgr: np.ndarray, boxes=None) -> bytes:
     a wide frame is downscaled by integer strides to a view (free), copied
     only at the small size, and the boxes (in native coords) are scaled by
     the same factor.
+
+    ``zones`` is a list of ``(polygon, label)`` where polygon is a list of
+    (x, y) in the camera's native decoded resolution (same space as boxes);
+    each zone is outlined and labeled via ImageDraw.
     """
     factor = 1
     if frame_bgr.shape[1] > 320:
@@ -85,6 +89,11 @@ def preview_encode(frame_bgr: np.ndarray, boxes=None) -> bytes:
         if boxes:
             boxes = [(x1 / factor, y1 / factor, x2 / factor, y2 / factor)
                      for x1, y1, x2, y2 in boxes]
+        if zones:
+            zones = [
+                ([(px / factor, py / factor) for px, py in poly], label)
+                for poly, label in zones
+            ]
     else:
         small = frame_bgr
 
@@ -104,6 +113,11 @@ def preview_encode(frame_bgr: np.ndarray, boxes=None) -> bytes:
 
     rgb = np.ascontiguousarray(work[:, :, ::-1])
     img = Image.fromarray(rgb)
+    if zones:
+        draw = ImageDraw.Draw(img)
+        for poly, label in zones:
+            draw.polygon([(px, py) for px, py in poly], outline="cyan")
+            draw.text((poly[0][0], poly[0][1]), label, fill="cyan")
     buf = __import__("io").BytesIO()
     img.save(buf, format="JPEG", quality=_JPEG_QUALITY)
     return buf.getvalue()
@@ -120,6 +134,7 @@ class PreviewEncoder(multiprocessing.Process):
         detection_stats: dict,
         detection_flags: dict,
         a72_cores=None,
+        zones=None,
     ):
         super().__init__(name="preview-encoder")
         self.camera_names = camera_names
@@ -128,6 +143,8 @@ class PreviewEncoder(multiprocessing.Process):
         self.detection_stats = detection_stats
         self.detection_flags = detection_flags
         self.a72_cores = a72_cores if a72_cores is not None else _A72_CORES
+        # Per-camera M4 zone configs: {name: [ZoneConfig, ...]}. Absent -> none.
+        self.zones = zones if zones is not None else {}
         self._boxes_cache: dict[str, tuple] = {}
 
     def _boxes(self, name: str) -> Optional[list]:
@@ -167,11 +184,22 @@ class PreviewEncoder(multiprocessing.Process):
                 last[name] = gen
                 _put_slot(self.slots, name, "raw", preview_encode(view))
                 boxes = self._boxes_cached(name)
-                if boxes:
-                    key = repr(boxes)
+                # Annotate when there are detections to draw, or when the
+                # camera has zones (so the zone outline renders even before
+                # anything is detected inside it).
+                zone_list = self.zones.get(name, [])
+                if boxes or zone_list:
+                    key = repr((boxes, [(z.name, z.polygon) for z in zone_list]))
                     if last_boxes.get(name) != key:
                         last_boxes[name] = key
                         _put_slot(
-                            self.slots, name, "ann", preview_encode(view, boxes=boxes)
+                            self.slots,
+                            name,
+                            "ann",
+                            preview_encode(
+                                view,
+                                boxes=boxes,
+                                zones=[(z.polygon, z.name) for z in zone_list],
+                            ),
                         )
             time.sleep(_POLL_S)

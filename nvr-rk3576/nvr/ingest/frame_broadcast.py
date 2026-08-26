@@ -103,6 +103,17 @@ class LatestFrameStore:
             return False
         return True
 
+    def dims(self, name: str) -> Optional[tuple[int, int]]:
+        """Return the camera's probed ``(width, height)``, or ``None`` before
+        the first frame has been published (or for unknown cameras)."""
+        if name not in self._gens:
+            return None
+        hw = self._hw[name]
+        h, w = hw[0].value, hw[1].value
+        if h <= 0 or w <= 0:
+            return None
+        return w, h
+
     def read(self, name: str) -> Optional[tuple[np.ndarray, int]]:
         """Return ``(copy, generation)`` for the camera's latest frame, or
         ``None`` if nothing has been written yet (or unknown camera)."""

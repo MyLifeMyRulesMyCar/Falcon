@@ -11,6 +11,12 @@ Multi-camera NVR ingest layer for Radxa CM4 (RK3576).
   motion detector, dual-core NPU parallelism, live detections in the
   control panel, and true-ingest instrumentation. Details in
   `docs/m2_detection.md`.
+- **M4** — per-camera centroid tracking + polygon zones: dwell/cooldown
+  events surfaced in the panel and `/api/zone_events`, zone outlines drawn
+  on the annotated stream, strict config validation, a Frigate-style UI zone
+  editor (draw/reshape/move/delete on the live frame), and name/url/zones
+  persisted back to `config/config.yaml`. Details in
+  `docs/m4_zones_tracking.md`.
 
 ## Requirements
 
@@ -227,7 +233,7 @@ NPU core) run the detector. The panel shows per-camera `infer fps`,
   (~1.8x); 4-camera combined ~12/s, capped by ingest demand, not NPU.
 - True ingest (decoder-counted) stays ~25-30 fps with detection active —
   the earlier "ingest regression" was a metric artifact.
-- pytest: 72 passed (the suite grew since the 57 in the M2 write-up).
+- pytest: 101 passed (the suite grew from 91 with M4.1).
 - Fresh-board reproduction (Aug 2026): identical bus.jpg gate score 0.029;
   live panel holds all four cameras at ~30 fps true ingest with zero
   steady-state restarts and per-camera infer ~12-20 fps (combined ~16-18/s).
@@ -242,10 +248,12 @@ python scripts/run_control_panel.py        # http://127.0.0.1:5050
 Start/stop individual cameras, edit their name/url (fields are locked while
 a camera is running), and watch fps/frames/restarts. Each row has a
 **watch** link that opens the mediamtx player for that camera
-(`http://<panel-host>:8888/<name>/`). Known limitation:
-camera edits are in-memory only — a panel restart resets all state and
-`config/config.yaml` is never written. Config persistence is a future
-increment, deliberately not part of M1.1.
+(`http://<panel-host>:8888/<name>/`) and a **zones** button that opens the
+Frigate-style zone editor (draw/reshape/move/delete polygons on the live
+frame, per-zone trigger classes/dwell/cooldown). Name/url/zones edits are
+persisted atomically to `config/config.yaml` and survive a panel restart
+(since M4.1; M1.1's in-memory-only limitation is lifted). A panel restart
+still resets in-memory detection stats and tracking state.
 
 The panel binds `127.0.0.1` by default; to reach it from another machine on
 the LAN, run `python scripts/run_control_panel.py --host 0.0.0.0` and open

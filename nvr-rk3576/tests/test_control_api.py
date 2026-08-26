@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nvr.config import CameraConfig
+from nvr.config import CameraConfig, ZoneConfig
 from nvr.control.api import create_app
 
 CAMERAS = {
@@ -65,6 +65,9 @@ class StubManager:
 
     def consume(self, timeout=0.05):
         return {}
+
+    def is_alive(self, name):
+        return name in self.running
 
     def stats(self):
         return dict(self.stats_data)
@@ -185,6 +188,12 @@ class _FakeFrameStore:
     def set(self, name, frame):
         self._data[name] = frame.copy()
         self._gen[name] = self._gen.get(name, 0) + 1
+
+    def dims(self, name):
+        if name not in self._data:
+            return None
+        h, w = self._data[name].shape[:2]
+        return (w, h)
 
     def read(self, name):
         if name not in self._data:
@@ -346,3 +355,186 @@ def test_detection_off_falls_back_to_manager_frame_count():
     cam_a = [r for r in client.get("/api/cameras").get_json() if r["name"] == "cam_a"][0]
     assert cam_a["frames_received"] == 42
     assert cam_a["inference_fps"] == 0.0
+
+
+def test_list_cameras_has_dims_when_published():
+    import numpy as np
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    store = _FakeFrameStore()
+    store.set("cam_a", np.zeros((360, 640, 3), dtype=np.uint8))
+    app = create_app(mgr, cameras, frame_store=store)
+    app.config["TESTING"] = True
+
+    rows = app.test_client().get("/api/cameras").get_json()
+    cam_a = [r for r in rows if r["name"] == "cam_a"][0]
+    assert cam_a["width"] == 640 and cam_a["height"] == 360
+    cam_b = [r for r in rows if r["name"] == "cam_b"][0]
+    assert cam_b["width"] is None and cam_b["height"] is None
+
+
+def test_get_zones_shape_and_404():
+    import numpy as np
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    cameras["cam_a"].zones = [
+        ZoneConfig(
+            name="entry",
+            polygon=[(10, 20), (30, 40), (50, 60)],
+            trigger_classes=["person"],
+            dwell_time_sec=2.0,
+            cooldown_sec=30,
+        )
+    ]
+    mgr = StubManager(cameras)
+    store = _FakeFrameStore()
+    store.set("cam_a", np.zeros((360, 640, 3), dtype=np.uint8))
+    app = create_app(mgr, cameras, frame_store=store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    res = client.get("/api/cameras/cam_a/zones")
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["width"] == 640 and body["height"] == 360
+    assert body["zones"] == [
+        {
+            "name": "entry",
+            "polygon": [[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]],
+            "trigger_classes": ["person"],
+            "dwell_time_sec": 2.0,
+            "cooldown_sec": 30.0,
+        }
+    ]
+    assert client.get("/api/cameras/nope/zones").status_code == 404
+
+
+def test_put_zones_valid_updates_and_calls_back():
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    calls = []
+    app = create_app(
+        StubManager(cameras),
+        cameras,
+        restart_detection=lambda: calls.append("d"),
+        restart_encoders=lambda: calls.append("e"),
+    )
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    payload = [
+        {
+            "name": "entry",
+            "polygon": [[10, 20], [30, 40], [50, 60]],
+            "trigger_classes": ["person"],
+            "dwell_time_sec": 2.0,
+            "cooldown_sec": 30,
+        }
+    ]
+    res = client.put("/api/cameras/cam_a/zones", json=payload)
+    assert res.status_code == 200
+    assert cameras["cam_a"].zones[0].name == "entry"
+    assert res.get_json()[0]["name"] == "entry"
+    assert calls == ["d", "e"]
+
+
+def test_put_zones_invalid_400_and_unknown_404():
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    calls = []
+    app = create_app(
+        StubManager(cameras),
+        cameras,
+        restart_detection=lambda: calls.append("d"),
+    )
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    bad = [
+        {
+            "name": "z",
+            "polygon": [[0, 0], [1, 1]],
+            "trigger_classes": ["person"],
+            "dwell_time_sec": 2.0,
+            "cooldown_sec": 0,
+        }
+    ]
+    res = client.put("/api/cameras/cam_a/zones", json=bad)
+    assert res.status_code == 400
+    assert "zone 'z'" in res.get_json()["error"]
+    assert calls == []  # nothing applied on validation failure
+    assert client.put("/api/cameras/nope/zones", json=[]).status_code == 404
+
+
+def test_put_zones_persists_to_config(tmp_path):
+    import numpy as np
+
+    from nvr.config import load_config
+    from nvr.control.api import create_app
+
+    cfg_path = str(tmp_path / "config.yaml")
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    store = _FakeFrameStore()
+    store.set("cam_a", np.zeros((360, 640, 3), dtype=np.uint8))
+    app = create_app(mgr, cameras, frame_store=store, config_path=cfg_path)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    payload = [
+        {
+            "name": "entry",
+            "polygon": [[0, 0], [640, 0], [640, 360], [0, 360]],
+            "trigger_classes": ["bird"],
+            "dwell_time_sec": 2.0,
+            "cooldown_sec": 30,
+        }
+    ]
+    assert client.put("/api/cameras/cam_a/zones", json=payload).status_code == 200
+
+    loaded = load_config(cfg_path)
+    assert [c.name for c in loaded.cameras] == ["cam_a", "cam_b"]
+    cam_a = [c for c in loaded.cameras if c.name == "cam_a"][0]
+    assert len(cam_a.zones) == 1 and cam_a.zones[0].name == "entry"
+
+
+def test_put_camera_persists_rename_to_config(tmp_path):
+    from nvr.config import load_config
+    from nvr.control.api import create_app
+
+    cfg_path = str(tmp_path / "config.yaml")
+    cameras = make_cameras()
+    app = create_app(StubManager(cameras), cameras, config_path=cfg_path)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    res = client.put("/api/cameras/cam_a", json={"name": "cam_x", "url": "rtsp://x"})
+    assert res.status_code == 200
+
+    loaded = load_config(cfg_path)
+    names = [c.name for c in loaded.cameras]
+    assert "cam_a" not in names and "cam_x" in names
+
+
+def test_put_while_running_does_not_persist(tmp_path):
+    from pathlib import Path
+
+    from nvr.control.api import create_app
+
+    cfg_path = str(tmp_path / "config.yaml")
+    cameras = make_cameras()
+    app = create_app(StubManager(cameras), cameras, config_path=cfg_path)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    client.post("/api/cameras/cam_a/start")
+    res = client.put("/api/cameras/cam_a", json={"name": "cam_a", "url": "rtsp://new"})
+    assert res.status_code == 409
+    assert not Path(cfg_path).exists()  # config never written on 409

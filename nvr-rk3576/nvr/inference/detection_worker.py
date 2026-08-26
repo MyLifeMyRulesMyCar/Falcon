@@ -25,10 +25,13 @@ from typing import Optional
 
 import numpy as np
 
+from nvr.config import ZoneConfig
 from nvr.inference.detector import ObjectDetector
 from nvr.inference.npu_pool import NpuCorePool
 from nvr.ingest.manager import IngestManager
 from nvr.motion.motion_gate import MotionGate
+from nvr.tracking.centroid_tracker import CentroidTracker
+from nvr.zones.zone_engine import ZoneEngine, event_to_dict
 
 log = logging.getLogger(__name__)
 
@@ -49,11 +52,13 @@ def get_nowait_or_none(queue_obj: multiprocessing.Queue) -> Optional[np.ndarray]
         return None
 
 
-def _update_stats(prev, elapsed: float, detections, skipped: int) -> dict:
+def _update_stats(prev, elapsed: float, detections, skipped: int, zone_events=None) -> dict:
     """Rolling-window stats, kept JSON-serializable (plain dicts/floats/strs).
 
     ``detections`` must already be plain ``{"class_name", "confidence"}``
     dicts — never dataclass objects, so the API can jsonify them directly.
+    ``zone_events`` (optional list of ``event_to_dict`` dicts) is appended to
+    a ``recent_zone_events`` ring capped at 20.
     """
     if prev is None:
         prev = {
@@ -63,6 +68,7 @@ def _update_stats(prev, elapsed: float, detections, skipped: int) -> dict:
             "last_detections": [],
             "inference_fps": 0.0,
             "skip_ratio": 0.0,
+            "recent_zone_events": [],
         }
     if skipped:
         prev["skipped"] += skipped
@@ -76,6 +82,10 @@ def _update_stats(prev, elapsed: float, detections, skipped: int) -> dict:
     prev["inference_fps"] = 1.0 / (sum(ring) / len(ring)) if ring else 0.0
     seen = prev["total"] + prev["skipped"]
     prev["skip_ratio"] = prev["skipped"] / seen if seen else 0.0
+    if zone_events:
+        recent = prev.setdefault("recent_zone_events", [])
+        recent.extend(zone_events)
+        del recent[:-20]
     return prev
 
 
@@ -128,6 +138,7 @@ class DetectionWorker(multiprocessing.Process):
         ingest_manager: IngestManager,
         stats: dict,
         detection_flags: Optional[dict] = None,
+        zone_configs: Optional[dict[str, list[ZoneConfig]]] = None,
     ):
         super().__init__(name="detection-worker")
         self.camera_names = camera_names
@@ -136,6 +147,10 @@ class DetectionWorker(multiprocessing.Process):
         # Shared (Manager) dict; read live every feeder pass, so toggling
         # detection never requires re-forking. Absent -> all enabled.
         self.detection_flags = detection_flags if detection_flags is not None else {}
+        # Per-camera M4 zone configs (empty list -> no zones). Absent -> none.
+        self.zone_configs = (
+            zone_configs if zone_configs is not None else {name: [] for name in camera_names}
+        )
 
     def run(self) -> None:
         gates = {name: MotionGate() for name in self.camera_names}
@@ -145,6 +160,13 @@ class DetectionWorker(multiprocessing.Process):
         # means a camera's frames can land on either core); the Manager dict
         # read-modify-write is not atomic, so serialize per camera.
         stats_locks = {name: threading.Lock() for name in self.camera_names}
+        # Per-camera M4 state, built post-fork so every worker lifetime starts
+        # with fresh tracking/zone state. core_worker guards access to these
+        # with the same stats_locks[name] (see the M4 note in core_worker).
+        trackers = {name: CentroidTracker() for name in self.camera_names}
+        zone_engines = {
+            name: ZoneEngine(self.zone_configs.get(name, [])) for name in self.camera_names
+        }
         log.info("detection worker started for %s", ", ".join(self.camera_names))
 
         def update_stats(name, elapsed, detections, skipped):
@@ -172,19 +194,38 @@ class DetectionWorker(multiprocessing.Process):
                 t0 = time.monotonic()
                 detections = detector.detect(frame, core=core)
                 elapsed = time.monotonic() - t0
-                update_stats(
-                    name,
-                    elapsed,
-                    [
-                        {
-                            "class_name": d.class_name,
-                            "confidence": round(d.confidence, 2),
-                            "bbox": [round(v, 1) for v in d.bbox_xyxy],
-                        }
-                        for d in detections
-                    ],
-                    skipped=skipped,
-                )
+                det_dicts = [
+                    {
+                        "class_name": d.class_name,
+                        "confidence": round(d.confidence, 2),
+                        "bbox": [round(v, 1) for v in d.bbox_xyxy],
+                    }
+                    for d in detections
+                ]
+                # M4 tracking/zone state is the same concurrency hazard the
+                # M2.2 fix addressed for stats: the shared work queue means
+                # both core threads can touch one camera's tracker, zone
+                # engine and stats concurrently. Reuse that per-camera lock —
+                # a corrupted track dict would silently wrong track IDs.
+                with stats_locks[name]:
+                    tracked = trackers[name].update(detections)
+                    events = zone_engines[name].evaluate(name, tracked)
+                    self.stats[name] = _update_stats(
+                        self.stats.get(name),
+                        elapsed,
+                        det_dicts,
+                        skipped,
+                        zone_events=[event_to_dict(ev) for ev in events],
+                    )
+                for ev in events:
+                    log.warning(
+                        "ZONE EVENT: %s/%s track=%s class=%s dwell=%.1fs",
+                        ev.camera,
+                        ev.zone,
+                        ev.track_id,
+                        ev.class_name,
+                        ev.dwell_time_sec,
+                    )
 
         threading.Thread(target=feeder, name="feeder", daemon=True).start()
         threading.Thread(target=core_worker, args=(0,), name="core-0", daemon=True).start()
