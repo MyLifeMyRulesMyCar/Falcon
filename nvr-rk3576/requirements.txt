@@ -5,3 +5,4 @@ flask
 Pillow
 paho-mqtt
 requests
+rknn-toolkit-lite2==2.3.2
