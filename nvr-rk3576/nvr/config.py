@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -23,15 +24,37 @@ class ZoneConfig:
 
 
 @dataclass
+class MqttConfig:
+    host: str
+    port: int = 1883
+    topic_prefix: str = "nvr"
+    username: Optional[str] = None
+    password: Optional[str] = None
+    enabled: bool = True
+
+
+@dataclass
+class HttpOutputConfig:
+    url: str
+    timeout_sec: float = 3.0
+    enabled: bool = True
+
+
+@dataclass
 class CameraConfig:
     name: str
     url: str
     zones: list[ZoneConfig] = field(default_factory=list)
+    publish_zone_events: bool = True
+    publish_detections: bool = False  # opt-in — high volume if left on
+    detection_publish_interval_sec: float = 5.0  # throttle for publish_detections
 
 
 @dataclass
 class NvrConfig:
-    cameras: list[CameraConfig] = field(default_factory=list)
+    cameras: list[CameraConfig]
+    mqtt: Optional[MqttConfig] = None
+    http_output: Optional[HttpOutputConfig] = None
 
 
 def load_config(path: str) -> NvrConfig:
@@ -71,9 +94,95 @@ def load_config(path: str) -> NvrConfig:
         if "url" not in entry or not isinstance(entry["url"], str):
             raise ConfigError(f"camera entry {i} is missing a 'url' string")
         zones = parse_zones(entry.get("zones", []), entry["name"])
-        parsed.append(CameraConfig(name=entry["name"], url=entry["url"], zones=zones))
+        publish_zone = entry.get("publish_zone_events", True)
+        publish_det = entry.get("publish_detections", False)
+        interval = entry.get("detection_publish_interval_sec", 5.0)
+        if not isinstance(publish_zone, bool) or not isinstance(publish_det, bool):
+            raise ConfigError(
+                f"camera entry {i}: publish_zone_events/publish_detections must be booleans"
+            )
+        try:
+            interval = float(interval)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"camera entry {i}: detection_publish_interval_sec must be a number"
+            ) from exc
+        if interval <= 0:
+            raise ConfigError(
+                f"camera entry {i}: detection_publish_interval_sec must be > 0"
+            )
+        parsed.append(
+            CameraConfig(
+                name=entry["name"],
+                url=entry["url"],
+                zones=zones,
+                publish_zone_events=publish_zone,
+                publish_detections=publish_det,
+                detection_publish_interval_sec=interval,
+            )
+        )
 
-    return NvrConfig(cameras=parsed)
+    mqtt = _parse_mqtt(raw.get("mqtt"))
+    http_output = _parse_http_output(raw.get("http_output"))
+    return NvrConfig(cameras=parsed, mqtt=mqtt, http_output=http_output)
+
+
+def _parse_mqtt(raw) -> Optional[MqttConfig]:
+    """Validate the optional top-level ``mqtt`` section; None when absent."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'mqtt' must be a mapping")
+    host = raw.get("host")
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigError("'mqtt.host' must be a non-empty string")
+    try:
+        port = int(raw.get("port", 1883))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("'mqtt.port' must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise ConfigError("'mqtt.port' must be in 1..65535")
+    prefix = raw.get("topic_prefix", "nvr")
+    if not isinstance(prefix, str) or not prefix.strip():
+        raise ConfigError("'mqtt.topic_prefix' must be a non-empty string")
+    username = raw.get("username")
+    password = raw.get("password")
+    if username is not None and not isinstance(username, str):
+        raise ConfigError("'mqtt.username' must be a string or absent")
+    if password is not None and not isinstance(password, str):
+        raise ConfigError("'mqtt.password' must be a string or absent")
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'mqtt.enabled' must be a boolean")
+    return MqttConfig(
+        host=host,
+        port=port,
+        topic_prefix=prefix,
+        username=username,
+        password=password,
+        enabled=enabled,
+    )
+
+
+def _parse_http_output(raw) -> Optional[HttpOutputConfig]:
+    """Validate the optional top-level ``http_output`` section."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'http_output' must be a mapping")
+    url = raw.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError("'http_output.url' must be a non-empty string")
+    try:
+        timeout = float(raw.get("timeout_sec", 3.0))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("'http_output.timeout_sec' must be a number") from exc
+    if timeout <= 0:
+        raise ConfigError("'http_output.timeout_sec' must be > 0")
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'http_output.enabled' must be a boolean")
+    return HttpOutputConfig(url=url, timeout_sec=timeout, enabled=enabled)
 
 
 def parse_zones(raw, camera_name: str) -> list[ZoneConfig]:
@@ -157,8 +266,14 @@ def _parse_polygon(raw, camera_name: str, zone_name: str) -> list[tuple[float, f
     return polygon
 
 
-def write_config(path: str, cameras: list[CameraConfig]) -> None:
-    """Persist cameras (name, url, zones) to ``path`` atomically.
+def write_config(
+    path: str,
+    cameras: list[CameraConfig],
+    mqtt: Optional[MqttConfig] = None,
+    http_output: Optional[HttpOutputConfig] = None,
+) -> None:
+    """Persist cameras (name, url, zones, publish flags) plus the optional
+    top-level ``mqtt`` / ``http_output`` sections to ``path`` atomically.
 
     The serialized document is re-loaded with :func:`load_config` before the
     write so a serialization bug can never leave a broken config file on disk.
@@ -180,12 +295,35 @@ def write_config(path: str, cameras: list[CameraConfig]) -> None:
                 }
                 for z in c.zones
             ]
+        if c.publish_zone_events is not True:
+            entry["publish_zone_events"] = c.publish_zone_events
+        if c.publish_detections is not False:
+            entry["publish_detections"] = c.publish_detections
+        if c.detection_publish_interval_sec != 5.0:
+            entry["detection_publish_interval_sec"] = c.detection_publish_interval_sec
         entries.append(entry)
+
+    doc: dict = {"cameras": entries}
+    if mqtt is not None:
+        doc["mqtt"] = {
+            "host": mqtt.host,
+            "port": mqtt.port,
+            "topic_prefix": mqtt.topic_prefix,
+            **({"username": mqtt.username} if mqtt.username else {}),
+            **({"password": mqtt.password} if mqtt.password else {}),
+            "enabled": mqtt.enabled,
+        }
+    if http_output is not None:
+        doc["http_output"] = {
+            "url": http_output.url,
+            "timeout_sec": http_output.timeout_sec,
+            "enabled": http_output.enabled,
+        }
     text = (
-        "# Generated by the NVR control panel: name/url/zones edits made in\n"
-        "# the UI are persisted here (hand edits are honored on load, but\n"
-        "# replaced on the next save).\n"
-        + yaml.safe_dump({"cameras": entries}, sort_keys=False)
+        "# Generated by the NVR control panel: name/url/zones and MQTT/HTTP\n"
+        "# output edits made in the UI are persisted here (hand edits are\n"
+        "# honored on load, but replaced on the next save).\n"
+        + yaml.safe_dump(doc, sort_keys=False)
     )
     tmp = f"{path}.tmp"
     Path(tmp).write_text(text, encoding="utf-8")

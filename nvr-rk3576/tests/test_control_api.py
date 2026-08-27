@@ -538,3 +538,181 @@ def test_put_while_running_does_not_persist(tmp_path):
     res = client.put("/api/cameras/cam_a", json={"name": "cam_a", "url": "rtsp://new"})
     assert res.status_code == 409
     assert not Path(cfg_path).exists()  # config never written on 409
+
+
+class _FakeMqttPublisher:
+    def __init__(self):
+        self.enabled = True
+        self.connected_flag = False
+        self.calls = []
+
+    def set_enabled(self, v):
+        self.enabled = v
+        self.calls.append(("set_enabled", v))
+
+    def connected(self):
+        return self.connected_flag
+
+    def reconfigure(self, cfg):
+        self.calls.append(("reconfigure", cfg))
+
+
+class _FakeHttpPublisher:
+    def __init__(self):
+        self.enabled = True
+        self.calls = []
+
+    def set_enabled(self, v):
+        self.enabled = v
+        self.calls.append(("set_enabled", v))
+
+
+def test_output_toggles_and_status():
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mqtt = _FakeMqttPublisher()
+    http = _FakeHttpPublisher()
+    app = create_app(
+        StubManager(cameras), cameras, mqtt_publisher=mqtt, http_publisher=http
+    )
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    st = client.get("/api/output/status").get_json()
+    assert st["mqtt"]["enabled"] is True
+    assert st["mqtt"]["connected"] is False
+    assert st["http"]["enabled"] is True
+
+    assert client.post("/api/output/mqtt/off").status_code == 200
+    assert mqtt.enabled is False
+    assert client.post("/api/output/http/off").status_code == 200
+    assert http.enabled is False
+    assert client.post("/api/output/mqtt/on").status_code == 200
+    assert mqtt.enabled is True
+    assert client.post("/api/output/mqtt/bogus").status_code == 400
+
+
+def test_output_toggle_unconfigured_404():
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    app = create_app(StubManager(cameras), cameras)  # no publishers
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    assert client.post("/api/output/mqtt/on").status_code == 404
+    assert client.post("/api/output/http/on").status_code == 404
+    st = client.get("/api/output/status").get_json()
+    assert st["mqtt"] is None and st["http"] is None
+
+
+def test_put_mqtt_settings_validates_persists_reconfigures(tmp_path):
+    from nvr.config import MqttConfig, load_config
+    from nvr.control.api import create_app
+
+    cfg_path = str(tmp_path / "config.yaml")
+    cameras = make_cameras()
+    mqtt = _FakeMqttPublisher()
+    mqtt_cfg = MqttConfig(host="old", port=1883, topic_prefix="nvr")
+    app = create_app(
+        StubManager(cameras),
+        cameras,
+        mqtt_publisher=mqtt,
+        mqtt_config=mqtt_cfg,
+        config_path=cfg_path,
+    )
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    res = client.put(
+        "/api/output/mqtt",
+        json={
+            "host": "broker.local",
+            "port": 1884,
+            "topic_prefix": "home",
+            "username": "u",
+            "password": "p",
+        },
+    )
+    assert res.status_code == 200
+    assert mqtt_cfg.host == "broker.local"
+    assert mqtt_cfg.port == 1884
+    assert mqtt_cfg.topic_prefix == "home"
+    assert any(c[0] == "reconfigure" for c in mqtt.calls)
+    loaded = load_config(cfg_path)
+    assert loaded.mqtt.host == "broker.local"
+    assert loaded.mqtt.username == "u"
+    assert loaded.mqtt.password == "p"
+
+    # invalid host -> 400, nothing persisted
+    res = client.put("/api/output/mqtt", json={"host": "  "})
+    assert res.status_code == 400
+    loaded = load_config(cfg_path)
+    assert loaded.mqtt.host == "broker.local"
+
+
+def test_publish_toggles_and_rows():
+    import multiprocessing
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    ze = multiprocessing.Manager().dict({"cam_a": True, "cam_b": True})
+    de = multiprocessing.Manager().dict({"cam_a": False, "cam_b": False})
+    app = create_app(
+        StubManager(cameras),
+        cameras,
+        publish_zone_events_flags=ze,
+        publish_detections_flags=de,
+    )
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    rows = client.get("/api/cameras").get_json()
+    assert all(r["publish_zone_events"] is True for r in rows)
+    assert all(r["publish_detections"] is False for r in rows)
+
+    assert client.post("/api/cameras/cam_a/publish/detections/on").status_code == 200
+    assert de["cam_a"] is True
+    assert client.post("/api/cameras/cam_a/publish/zone_events/off").status_code == 200
+    assert ze["cam_a"] is False
+    assert client.post("/api/cameras/nope/publish/detections/on").status_code == 404
+    assert client.post("/api/cameras/cam_a/publish/bogus/on").status_code == 400
+    assert client.post("/api/cameras/cam_a/publish/detections/weird").status_code == 400
+
+    rows = client.get("/api/cameras").get_json()
+    cam_a = [r for r in rows if r["name"] == "cam_a"][0]
+    assert cam_a["publish_zone_events"] is False
+    assert cam_a["publish_detections"] is True
+
+
+def test_camera_save_preserves_output_sections(tmp_path):
+    from nvr.config import HttpOutputConfig, MqttConfig, load_config
+    from nvr.control.api import create_app
+
+    cfg_path = str(tmp_path / "config.yaml")
+    cameras = make_cameras()
+    app = create_app(
+        StubManager(cameras),
+        cameras,
+        config_path=cfg_path,
+        mqtt_config=MqttConfig(host="h", port=1883, topic_prefix="t"),
+        http_output_config=HttpOutputConfig(url="http://x"),
+    )
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    assert client.put("/api/cameras/cam_a/zones", json=[]).status_code == 200
+    loaded = load_config(cfg_path)
+    assert loaded.mqtt.host == "h"
+    assert loaded.http_output.url == "http://x"
+
+    assert (
+        client.put("/api/cameras/cam_a", json={"name": "cam_x", "url": "rtsp://x"}).status_code
+        == 200
+    )
+    loaded = load_config(cfg_path)
+    assert loaded.mqtt.host == "h"
+    assert loaded.http_output.url == "http://x"
+    assert "cam_x" in [c.name for c in loaded.cameras]

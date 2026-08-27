@@ -17,6 +17,12 @@ Multi-camera NVR ingest layer for Radxa CM4 (RK3576).
   editor (draw/reshape/move/delete on the live frame), and name/url/zones
   persisted back to `config/config.yaml`. Details in
   `docs/m4_zones_tracking.md`.
+- **M5** — MQTT + HTTP output: zone events and opt-in, throttled detection
+  summaries as separate topics/content types, non-blocking bounded-queue
+  publishers (a dead broker/endpoint never stalls detection), auto-reconnect,
+  live MQTT/HTTP + per-camera content toggles in the panel, and MQTT
+  settings (host/port/username/password) editable + persisted in the UI.
+  Details in `docs/m5_mqtt_http.md`.
 
 ## Requirements
 
@@ -233,7 +239,7 @@ NPU core) run the detector. The panel shows per-camera `infer fps`,
   (~1.8x); 4-camera combined ~12/s, capped by ingest demand, not NPU.
 - True ingest (decoder-counted) stays ~25-30 fps with detection active —
   the earlier "ingest regression" was a metric artifact.
-- pytest: 101 passed (the suite grew from 91 with M4.1).
+- pytest: 122 passed (the suite grew from 101 with M5).
 - Fresh-board reproduction (Aug 2026): identical bus.jpg gate score 0.029;
   live panel holds all four cameras at ~30 fps true ingest with zero
   steady-state restarts and per-camera infer ~12-20 fps (combined ~16-18/s).

@@ -3,3 +3,5 @@ pyyaml
 pytest
 flask
 Pillow
+paho-mqtt
+requests

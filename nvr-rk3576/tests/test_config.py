@@ -43,6 +43,21 @@ cameras:
         cooldown_sec: 30
 """
 
+MQTT_HTTP_YAML = """
+mqtt:
+  host: 192.168.1.10
+  port: 1883
+  topic_prefix: nvr
+  username: bob
+  password: secret
+http_output:
+  url: http://example.com/nvr
+  timeout_sec: 5
+cameras:
+  - name: cam_a
+    url: rtsp://a
+"""
+
 
 def _write(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "config.yaml"
@@ -187,3 +202,53 @@ def test_write_config_validates_before_replacing(tmp_path):
     with pytest.raises(ConfigError):
         write_config(str(out), [bad])
     assert out.read_text() == before
+
+
+def test_mqtt_and_http_parse(tmp_path):
+    cfg = load_config(str(_write(tmp_path, MQTT_HTTP_YAML)))
+    assert cfg.mqtt is not None
+    assert cfg.mqtt.host == "192.168.1.10"
+    assert cfg.mqtt.port == 1883
+    assert cfg.mqtt.topic_prefix == "nvr"
+    assert cfg.mqtt.username == "bob"
+    assert cfg.mqtt.password == "secret"
+    assert cfg.http_output is not None
+    assert cfg.http_output.url == "http://example.com/nvr"
+    assert cfg.http_output.timeout_sec == 5.0
+
+
+def test_mqtt_http_absent_by_default(tmp_path):
+    cfg = load_config(str(_write(tmp_path, VALID_YAML)))
+    assert cfg.mqtt is None
+    assert cfg.http_output is None
+
+
+def test_invalid_mqtt_raises(tmp_path):
+    with pytest.raises(ConfigError) as ei:
+        load_config(
+            str(_write(tmp_path, "mqtt:\n  host: ''\ncameras:\n  - name: a\n    url: rtsp://a\n"))
+        )
+    assert "mqtt" in str(ei.value)
+
+
+def test_write_config_round_trips_mqtt_http(tmp_path):
+    cfg = load_config(str(_write(tmp_path, MQTT_HTTP_YAML)))
+    out = tmp_path / "out.yaml"
+    write_config(str(out), cfg.cameras, cfg.mqtt, cfg.http_output)
+    loaded = load_config(str(out))
+    assert loaded.cameras == cfg.cameras
+    assert loaded.mqtt == cfg.mqtt
+    assert loaded.http_output == cfg.http_output
+
+
+def test_camera_publish_fields_parse(tmp_path):
+    y = (
+        "cameras:\n  - name: cam_a\n    url: rtsp://a\n"
+        "    publish_zone_events: false\n    publish_detections: true\n"
+        "    detection_publish_interval_sec: 2.5\n"
+    )
+    cfg = load_config(str(_write(tmp_path, y)))
+    c = cfg.cameras[0]
+    assert c.publish_zone_events is False
+    assert c.publish_detections is True
+    assert c.detection_publish_interval_sec == 2.5

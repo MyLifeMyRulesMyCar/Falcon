@@ -12,7 +12,14 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 from PIL import Image
 
-from nvr.config import CameraConfig, ConfigError, parse_zones, write_config
+from nvr.config import (
+    CameraConfig,
+    ConfigError,
+    HttpOutputConfig,
+    MqttConfig,
+    parse_zones,
+    write_config,
+)
 from nvr.control.preview_encoder import preview_encode, read_slot
 from nvr.ingest.manager import IngestManager
 
@@ -58,6 +65,12 @@ def create_app(
     preview_slots=None,
     restart_encoders: Optional[callable] = None,
     config_path: Optional[str] = None,
+    mqtt_publisher=None,
+    http_publisher=None,
+    publish_zone_events_flags: Optional[dict] = None,
+    publish_detections_flags: Optional[dict] = None,
+    mqtt_config: Optional[MqttConfig] = None,
+    http_output_config: Optional[HttpOutputConfig] = None,
 ) -> Flask:
     """Build the Flask app. ``cameras`` is the live name->config dict the
     panel edits; the manager must own the same CameraConfig objects.
@@ -81,6 +94,12 @@ def create_app(
     app = Flask(__name__, static_url_path="/static")
     detection_stats = detection_stats if detection_stats is not None else {}
     detection_flags = detection_flags if detection_flags is not None else {}
+    publish_zone_events_flags = (
+        publish_zone_events_flags if publish_zone_events_flags is not None else {}
+    )
+    publish_detections_flags = (
+        publish_detections_flags if publish_detections_flags is not None else {}
+    )
 
     # Frame counters only advance when someone drains the queues. The smoke
     # test does that in its loop; here a background thread does it so the
@@ -238,6 +257,12 @@ def create_app(
                     "recent_zone_events": d.get("recent_zone_events", []),
                     "width": (_camera_dims(frame_store, name) or (None, None))[0],
                     "height": (_camera_dims(frame_store, name) or (None, None))[1],
+                    "publish_zone_events": bool(
+                        publish_zone_events_flags.get(name, cfg.publish_zone_events)
+                    ),
+                    "publish_detections": bool(
+                        publish_detections_flags.get(name, cfg.publish_detections)
+                    ),
                 }
             )
         return jsonify(rows)
@@ -272,7 +297,7 @@ def create_app(
         cameras[name].zones = parsed
         if config_path:
             try:
-                write_config(config_path, list(cameras.values()))
+                write_config(config_path, list(cameras.values()), mqtt_config, http_output_config)
             except (ConfigError, OSError) as exc:
                 cameras[name].zones = old  # revert
                 return jsonify({"error": f"failed to persist config: {exc}"}), 500
@@ -291,6 +316,117 @@ def create_app(
                 events.append(ev)
         events.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
         return jsonify(events[:50])
+
+    @app.post("/api/output/mqtt/<state>")
+    def toggle_mqtt(state: str):
+        if mqtt_publisher is None:
+            return jsonify({"error": "mqtt is not configured"}), 404
+        if state not in ("on", "off"):
+            return jsonify({"error": "state must be 'on' or 'off'"}), 400
+        mqtt_publisher.set_enabled(state == "on")
+        return "", 200
+
+    @app.post("/api/output/http/<state>")
+    def toggle_http(state: str):
+        if http_publisher is None:
+            return jsonify({"error": "http output is not configured"}), 404
+        if state not in ("on", "off"):
+            return jsonify({"error": "state must be 'on' or 'off'"}), 400
+        http_publisher.set_enabled(state == "on")
+        return "", 200
+
+    @app.get("/api/output/status")
+    def output_status():
+        return jsonify(
+            {
+                "mqtt": (
+                    {
+                        "enabled": bool(mqtt_publisher.enabled),
+                        "connected": bool(mqtt_publisher.connected()),
+                        "host": mqtt_config.host if mqtt_config else None,
+                        "port": mqtt_config.port if mqtt_config else None,
+                        "topic_prefix": mqtt_config.topic_prefix if mqtt_config else None,
+                        "username": mqtt_config.username if mqtt_config else None,
+                    }
+                    if mqtt_publisher is not None
+                    else None
+                ),
+                "http": (
+                    {"enabled": bool(http_publisher.enabled)}
+                    if http_publisher is not None
+                    else None
+                ),
+            }
+        )
+
+    @app.put("/api/output/mqtt")
+    def set_mqtt_settings():
+        """Edit MQTT host/port/topic_prefix/username/password live + persist."""
+        if mqtt_config is None or mqtt_publisher is None:
+            return jsonify({"error": "mqtt is not configured"}), 400
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "body must be an object"}), 400
+        host = body.get("host")
+        port = body.get("port", mqtt_config.port)
+        prefix = body.get("topic_prefix", mqtt_config.topic_prefix)
+        username = body.get("username", mqtt_config.username) or None
+        password = body.get("password", mqtt_config.password) or None
+        if not isinstance(host, str) or not host.strip():
+            return jsonify({"error": "'host' must be a non-empty string"}), 400
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return jsonify({"error": "'port' must be an integer"}), 400
+        if not 1 <= port <= 65535:
+            return jsonify({"error": "'port' must be in 1..65535"}), 400
+        if not isinstance(prefix, str) or not prefix.strip():
+            return jsonify({"error": "'topic_prefix' must be a non-empty string"}), 400
+        new_config = MqttConfig(
+            host=host.strip(),
+            port=port,
+            topic_prefix=prefix.strip(),
+            username=username,
+            password=password,
+            enabled=mqtt_config.enabled,
+        )
+        if config_path:
+            try:
+                write_config(
+                    config_path, list(cameras.values()), new_config, http_output_config
+                )
+            except (ConfigError, OSError) as exc:
+                return jsonify({"error": f"failed to persist config: {exc}"}), 500
+        # Apply live: mutate the shared config object, reconnect the publisher.
+        mqtt_config.host = new_config.host
+        mqtt_config.port = new_config.port
+        mqtt_config.topic_prefix = new_config.topic_prefix
+        mqtt_config.username = new_config.username
+        mqtt_config.password = new_config.password
+        mqtt_publisher.reconfigure(new_config)
+        return jsonify(
+            {
+                "host": mqtt_config.host,
+                "port": mqtt_config.port,
+                "topic_prefix": mqtt_config.topic_prefix,
+                "username": mqtt_config.username,
+            }
+        )
+
+    @app.post("/api/cameras/<name>/publish/<content>/<state>")
+    def toggle_publish(name: str, content: str, state: str):
+        """Live per-camera output content switch (zone_events | detections)."""
+        if name not in cameras:
+            return jsonify({"error": f"unknown camera: {name}"}), 404
+        if content not in ("zone_events", "detections"):
+            return jsonify({"error": "content must be 'zone_events' or 'detections'"}), 400
+        if state not in ("on", "off"):
+            return jsonify({"error": "state must be 'on' or 'off'"}), 400
+        flags = (
+            publish_zone_events_flags if content == "zone_events" else publish_detections_flags
+        )
+        flags[name] = state == "on"
+        return "", 200
 
     @app.post("/api/cameras/<name>/start")
     def start_camera(name: str):
@@ -348,7 +484,7 @@ def create_app(
         if config_path:
             prospective = [new_config if c.name == name else c for c in cameras.values()]
             try:
-                write_config(config_path, prospective)
+                write_config(config_path, prospective, mqtt_config, http_output_config)
             except (ConfigError, OSError) as exc:
                 return jsonify({"error": f"failed to persist config: {exc}"}), 500
         try:

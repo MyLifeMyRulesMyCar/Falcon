@@ -28,11 +28,24 @@
   .zone-edit label { display: flex; flex-direction: column; font-size: 0.85em; color: #aaa; }
   .zone-edit input { width: 120px; background: #1a1a1a; color: #ddd;
                      border: 1px solid #444; padding: 3px; }
+  .output-bar { display: flex; gap: 8px; align-items: center; margin: 10px 0 4px 0; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot.on { background: #1d8a1d; }
+  .dot.off { background: #555; }
+  #mqtt-host, #mqtt-port, #mqtt-prefix { width: 160px; }
+  #mqtt-user, #mqtt-pass { width: 140px; }
 </style>
 </head>
 <body>
 <h1>NVR control panel</h1>
-<div class="note">frames/fps shown from the ingest queues; edits are in-memory only (lost on panel restart).</div>
+<div class="note">name/url/zones and MQTT settings edits are persisted to config/config.yaml.</div>
+<div class="output-bar">
+  <button id="out-mqtt">MQTT: --</button>
+  <span id="out-mqtt-dot" class="dot off"></span>
+  <button id="out-http">HTTP: --</button>
+  <button id="out-mqtt-settings">MQTT settings</button>
+  <span id="out-status" class="note"></span>
+</div>
 <table id="cameras">
   <thead>
     <tr>
@@ -67,6 +80,24 @@
     <div class="zone-toolbar">
       <button id="zone-save">Save zones</button>
       <button id="zone-close">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="mqtt-modal" class="modal" style="display:none">
+  <div class="modal-box">
+    <h2>MQTT settings</h2>
+    <div class="zone-edit">
+      <label>host <input id="mqtt-host" type="text"></label>
+      <label>port <input id="mqtt-port" type="number" min="1" max="65535"></label>
+      <label>topic prefix <input id="mqtt-prefix" type="text"></label>
+      <label>username <input id="mqtt-user" type="text" autocomplete="off"></label>
+      <label>password <input id="mqtt-pass" type="password" autocomplete="new-password"></label>
+    </div>
+    <div class="zone-toolbar">
+      <button id="mqtt-save">Save</button>
+      <button id="mqtt-close">Cancel</button>
+      <span id="mqtt-status" class="note"></span>
     </div>
   </div>
 </div>
@@ -148,6 +179,20 @@ function row(cam) {
   const detectBtn = document.createElement("button");
   detectBtn.textContent = cam.detection_enabled ? "Detect: ON" : "Detect: OFF";
 
+  // M5: per-camera output content toggles (zone events / detection summaries).
+  const zBtn = document.createElement("button");
+  zBtn.textContent = "Z:" + (cam.publish_zone_events ? "ON" : "OFF");
+  zBtn.onclick = () => act(
+    "/api/cameras/" + encodeURIComponent(cam.name) + "/publish/zone_events/"
+      + (cam.publish_zone_events ? "off" : "on"),
+    { method: "POST" }, refresh);
+  const dBtn = document.createElement("button");
+  dBtn.textContent = "D:" + (cam.publish_detections ? "ON" : "OFF");
+  dBtn.onclick = () => act(
+    "/api/cameras/" + encodeURIComponent(cam.name) + "/publish/detections/"
+      + (cam.publish_detections ? "off" : "on"),
+    { method: "POST" }, refresh);
+
   // Opens the mediamtx player for this camera on the same host the panel
   // is served from (works from any IP you browse to). cam_d is the
   // standalone HTTP-FLV source, so its page loads but shows no video.
@@ -182,6 +227,8 @@ function row(cam) {
   stopTd.appendChild(stopBtn);
   const detectTd = document.createElement("td");
   detectTd.appendChild(detectBtn);
+  detectTd.appendChild(zBtn);
+  detectTd.appendChild(dBtn);
   const watchTd = document.createElement("td");
   watchTd.appendChild(watchLink);
   watchTd.appendChild(zonesBtn);
@@ -565,6 +612,100 @@ zoneSave.onclick = () => {
 };
 
 zoneClose.onclick = closeZoneEditor;
+
+/* ---------- M5 output bar (MQTT / HTTP toggles + settings) ---------- */
+const outMqttBtn = document.getElementById("out-mqtt");
+const outMqttDot = document.getElementById("out-mqtt-dot");
+const outHttpBtn = document.getElementById("out-http");
+const outStatus = document.getElementById("out-status");
+const mqttModal = document.getElementById("mqtt-modal");
+const mqttHost = document.getElementById("mqtt-host");
+const mqttPort = document.getElementById("mqtt-port");
+const mqttPrefix = document.getElementById("mqtt-prefix");
+const mqttUser = document.getElementById("mqtt-user");
+const mqttPass = document.getElementById("mqtt-pass");
+const mqttStatus = document.getElementById("mqtt-status");
+
+function setOutputUI(s) {
+  const m = s.mqtt, h = s.http;
+  if (m) {
+    outMqttBtn.textContent = "MQTT: " + (m.enabled ? "ON" : "OFF");
+    outMqttDot.className = "dot " + (m.connected ? "on" : "off");
+    outMqttDot.title = m.connected ? "connected" : "disconnected";
+  } else {
+    outMqttBtn.textContent = "MQTT: n/a";
+    outMqttDot.className = "dot off";
+  }
+  outHttpBtn.textContent = h ? ("HTTP: " + (h.enabled ? "ON" : "OFF")) : "HTTP: n/a";
+}
+
+function loadOutputStatus() {
+  fetch("/api/output/status")
+    .then((res) => res.json())
+    .then(setOutputUI)
+    .catch(() => {});
+}
+
+function toggleOutput(kind, state) {
+  return fetch("/api/output/" + kind + "/" + state, { method: "POST" })
+    .then((res) => {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      loadOutputStatus();
+    })
+    .catch((e) => { outStatus.textContent = kind + " toggle failed: " + e; });
+}
+
+outMqttBtn.onclick = () => {
+  if (!outMqttBtn.textContent.includes("ON") && !outMqttBtn.textContent.includes("OFF")) return;
+  toggleOutput("mqtt", outMqttBtn.textContent.includes("ON") ? "off" : "on");
+};
+outHttpBtn.onclick = () => toggleOutput("http", outHttpBtn.textContent.includes("ON") ? "off" : "on");
+
+document.getElementById("out-mqtt-settings").onclick = () => {
+  fetch("/api/output/status")
+    .then((res) => res.json())
+    .then((s) => {
+      const m = s.mqtt;
+      if (!m) { outStatus.textContent = "mqtt not configured in config.yaml"; return; }
+      mqttHost.value = m.host || "";
+      mqttPort.value = m.port || 1883;
+      mqttPrefix.value = m.topic_prefix || "nvr";
+      mqttUser.value = m.username || "";
+      mqttPass.value = "";
+      mqttStatus.textContent = "";
+      mqttModal.style.display = "flex";
+    })
+    .catch((e) => { outStatus.textContent = "cannot load mqtt settings: " + e; });
+};
+
+document.getElementById("mqtt-save").onclick = () => {
+  const payload = {
+    host: mqttHost.value.trim(),
+    port: parseInt(mqttPort.value, 10) || 1883,
+    topic_prefix: mqttPrefix.value.trim() || "nvr",
+    username: mqttUser.value.trim(),
+    password: mqttPass.value,
+  };
+  fetch("/api/output/mqtt", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || ("HTTP " + res.status));
+      }
+      mqttModal.style.display = "none";
+      loadOutputStatus();
+    })
+    .catch((e) => { mqttStatus.textContent = "save failed: " + e.message; });
+};
+
+document.getElementById("mqtt-close").onclick = () => { mqttModal.style.display = "none"; };
+
+loadOutputStatus();
+
 
 </script>
 </body>

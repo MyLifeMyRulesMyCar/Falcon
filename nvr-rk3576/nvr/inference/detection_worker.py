@@ -30,6 +30,7 @@ from nvr.inference.detector import ObjectDetector
 from nvr.inference.npu_pool import NpuCorePool
 from nvr.ingest.manager import IngestManager
 from nvr.motion.motion_gate import MotionGate
+from nvr.output.dispatcher import OutputDispatcher
 from nvr.tracking.centroid_tracker import CentroidTracker
 from nvr.zones.zone_engine import ZoneEngine, event_to_dict
 
@@ -139,6 +140,10 @@ class DetectionWorker(multiprocessing.Process):
         stats: dict,
         detection_flags: Optional[dict] = None,
         zone_configs: Optional[dict[str, list[ZoneConfig]]] = None,
+        dispatcher: Optional[OutputDispatcher] = None,
+        publish_configs: Optional[dict] = None,
+        publish_zone_events_flags: Optional[dict] = None,
+        publish_detections_flags: Optional[dict] = None,
     ):
         super().__init__(name="detection-worker")
         self.camera_names = camera_names
@@ -150,6 +155,17 @@ class DetectionWorker(multiprocessing.Process):
         # Per-camera M4 zone configs (empty list -> no zones). Absent -> none.
         self.zone_configs = (
             zone_configs if zone_configs is not None else {name: [] for name in camera_names}
+        )
+        # M5 output. dispatcher None -> no publishing (smoke test etc.).
+        self.dispatcher = dispatcher
+        self.publish_configs = publish_configs or {}
+        # Live-toggleable per-camera content switches (Manager dicts, same
+        # pattern as detection_flags); absent -> config defaults.
+        self.publish_zone_events_flags = (
+            publish_zone_events_flags if publish_zone_events_flags is not None else {}
+        )
+        self.publish_detections_flags = (
+            publish_detections_flags if publish_detections_flags is not None else {}
         )
 
     def run(self) -> None:
@@ -167,6 +183,8 @@ class DetectionWorker(multiprocessing.Process):
         zone_engines = {
             name: ZoneEngine(self.zone_configs.get(name, [])) for name in self.camera_names
         }
+        # M5: per-camera last detection-summary publish (wall clock).
+        last_detection_publish = {name: 0.0 for name in self.camera_names}
         log.info("detection worker started for %s", ", ".join(self.camera_names))
 
         def update_stats(name, elapsed, detections, skipped):
@@ -217,6 +235,23 @@ class DetectionWorker(multiprocessing.Process):
                         skipped,
                         zone_events=[event_to_dict(ev) for ev in events],
                     )
+                    if self.dispatcher is not None:
+                        # Non-blocking: publish() is a bounded-queue put with
+                        # drop-oldest, so a down broker/endpoint can't stall
+                        # this NPU-adjacent thread.
+                        if self.publish_zone_events_flags.get(name, True):
+                            for ev in events:
+                                self.dispatcher.publish_zone_event(name, ev)
+                        if self.publish_detections_flags.get(name, False) and detections:
+                            interval = self.publish_configs.get(name, {}).get(
+                                "detection_publish_interval_sec", 5.0
+                            )
+                            pub_now = time.time()
+                            if pub_now - last_detection_publish[name] >= interval:
+                                self.dispatcher.publish_detection_summary(
+                                    name, detections, pub_now
+                                )
+                                last_detection_publish[name] = pub_now
                 for ev in events:
                     log.warning(
                         "ZONE EVENT: %s/%s track=%s class=%s dwell=%.1fs",

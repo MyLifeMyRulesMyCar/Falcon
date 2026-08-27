@@ -21,6 +21,9 @@ from nvr.control.preview_encoder import PreviewEncoder, make_slots
 from nvr.inference.detection_worker import DetectionWorker
 from nvr.ingest.frame_broadcast import LatestFrameStore
 from nvr.ingest.manager import IngestManager
+from nvr.output.dispatcher import OutputDispatcher
+from nvr.output.http_publisher import HttpPublisher
+from nvr.output.mqtt_publisher import MqttPublisher
 
 
 def main() -> None:
@@ -43,13 +46,47 @@ def main() -> None:
     stats = multiprocessing.Manager().dict()
     detection_flags = multiprocessing.Manager().dict()
 
+    # M5 output: publishers own their network connections and drain bounded
+    # queues in this (stable, never re-forked) process; the DetectionWorker
+    # inherits them at fork and just enqueues. enabled flags are fork-shared
+    # so the panel's live toggles reach the worker immediately.
+    mqtt_publisher = MqttPublisher(config.mqtt) if config.mqtt else None
+    http_publisher = HttpPublisher(config.http_output) if config.http_output else None
+    dispatcher = OutputDispatcher(
+        mqtt_publisher,
+        http_publisher,
+        config.mqtt.topic_prefix if config.mqtt else "nvr",
+    )
+    publish_zone_events_flags = multiprocessing.Manager().dict(
+        {name: c.publish_zone_events for name, c in cameras.items()}
+    )
+    publish_detections_flags = multiprocessing.Manager().dict(
+        {name: c.publish_detections for name, c in cameras.items()}
+    )
+    publish_configs = {
+        name: {
+            "publish_zone_events": c.publish_zone_events,
+            "publish_detections": c.publish_detections,
+            "detection_publish_interval_sec": c.detection_publish_interval_sec,
+        }
+        for name, c in cameras.items()
+    }
+
     # Fresh on every call: cameras are renamed/edited live, so zones must be
     # recomputed from the current dict whenever a worker/encoder re-forks.
     def current_zone_configs() -> dict:
         return {name: c.zones for name, c in cameras.items()}
 
     worker = DetectionWorker(
-        list(cameras), manager, stats, detection_flags, current_zone_configs()
+        list(cameras),
+        manager,
+        stats,
+        detection_flags,
+        current_zone_configs(),
+        dispatcher,
+        publish_configs,
+        publish_zone_events_flags,
+        publish_detections_flags,
     )
     worker.start()
 
@@ -79,7 +116,15 @@ def main() -> None:
         worker.terminate()
         worker.join(timeout=5)
         worker = DetectionWorker(
-            list(cameras), manager, stats, detection_flags, current_zone_configs()
+            list(cameras),
+            manager,
+            stats,
+            detection_flags,
+            current_zone_configs(),
+            dispatcher,
+            publish_configs,
+            publish_zone_events_flags,
+            publish_detections_flags,
         )
         worker.start()
 
@@ -105,6 +150,12 @@ def main() -> None:
         preview_slots=slots,
         restart_encoders=restart_encoders,
         config_path=args.config,
+        mqtt_publisher=mqtt_publisher,
+        http_publisher=http_publisher,
+        publish_zone_events_flags=publish_zone_events_flags,
+        publish_detections_flags=publish_detections_flags,
+        mqtt_config=config.mqtt,
+        http_output_config=config.http_output,
     )
     print(f"control panel: http://{args.host}:{args.port}  ({len(cameras)} cameras)")
     app.run(host=args.host, port=args.port, threaded=True)
