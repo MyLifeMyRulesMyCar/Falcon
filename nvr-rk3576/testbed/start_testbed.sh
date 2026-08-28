@@ -30,8 +30,11 @@ echo $! > mediamtx.pid
 sleep 3
 
 # cam_a: RTSP publish, read back over RTSP
+# -rtsp_transport tcp: mediamtx's HLS muxer crashes ("too many reordered
+# frames") when loopback UDP RTP reorders under load (soak finding) — TCP is
+# ordered/loss-free even under load.
 setsid ffmpeg -loglevel error -re -stream_loop -1 -i sample.mp4 \
-    -c copy -f rtsp rtsp://127.0.0.1:8554/cam_a \
+    -c copy -rtsp_transport tcp -f rtsp rtsp://127.0.0.1:8554/cam_a \
     > cam_a.log 2>&1 &
 echo $! > cam_a.pid
 
@@ -43,7 +46,7 @@ echo $! > cam_b.pid
 
 # cam_c: RTSP publish, read back over HTTP (HLS on :8888)
 setsid ffmpeg -loglevel error -re -stream_loop -1 -i sample.mp4 \
-    -c copy -f rtsp rtsp://127.0.0.1:8554/cam_c \
+    -c copy -rtsp_transport tcp -f rtsp rtsp://127.0.0.1:8554/cam_c \
     > cam_c.log 2>&1 &
 echo $! > cam_c.pid
 
@@ -57,7 +60,7 @@ echo $! > cam_c.pid
 setsid sh -c '
     PUB_START=$(date +%s); \
     ffmpeg -loglevel error -re -stream_loop -1 -i sample.mp4 \
-        -c copy -f rtsp rtsp://127.0.0.1:8554/cam_d \
+        -c copy -rtsp_transport tcp -f rtsp rtsp://127.0.0.1:8554/cam_d \
         > /dev/null 2>&1 &
     while true; do
         ffmpeg -loglevel error -re -stream_loop -1 -i sample.mp4 \

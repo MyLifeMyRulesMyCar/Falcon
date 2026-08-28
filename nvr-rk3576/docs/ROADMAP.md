@@ -78,13 +78,25 @@ muxer crash, not a new finding. **MQTT: 0 disconnects.** No camera ever went
 not-alive. Memory: bounded sawtooth 0.95-2.3 GB (no monotonic leak; last 3h
 oscillated 1.2-1.9 GB). Raw log: `docs/soak_10h.log`.
 
-## fmp4 fix — applied + confirming
+## Root cause + fix — CLOSED
 
-`hlsVariant: fmp4` applied to `testbed/mediamtx.yml` (top-level: v1.12.2 does
-not allow `hlsVariant` per-path — the "unknown field" error). Restarted the
-stack. A 30-min focused confirmation run writes `/tmp/soak_confirm.log`:
-acceptance = cam_c restarts ~0 (vs ~1-2/min baseline), cam_a/b/d ~30 fps 0
-restarts, MQTT connected, memory bounded. Result appended when it lands.
+The crash is **load/UDP-driven, not feed-config-driven**: an isolated mediamtx
+with the identical `-c copy` UDP publisher ran **31 min with 0 crashes** while
+the live mediamtx crashed every ~30s-5min under the full stack load (and the
+A/B test's extra load accelerated the live crashes). Under CPU/network load,
+loopback **UDP RTP packets reorder/drop**, mediamtx's HLS muxer accumulates
+frames past its **28-frame DTS-reorder limit** and crashes ("unable to extract
+DTS: too many reordered frames"). fMP4 did NOT help (same crash live).
+
+**Fix (applied):** `-rtsp_transport tcp` on the three RTSP publishers in
+`testbed/start_testbed.sh` (cam_a/cam_c/cam_d) — TCP is ordered and loss-free
+even under load. `hlsVariant` reverted to mpegts (the variant was never the
+cause).
+
+**Confirmation (30 min, live, TCP):** cam_c **0 restarts** (vs ~2/min with
+UDP), cam_a/b/d 0/0/4 restarts, all ~30 fps, **0 mediamtx muxer crashes**,
+MQTT connected, memory bounded (~1.1-1.4 GB). Acceptance met — the cam_c
+churn item is **CLOSED**.
 
 ## Open (owned by external inputs or future work)
 

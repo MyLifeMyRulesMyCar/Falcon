@@ -2,13 +2,10 @@
 # one per simulated camera. All server defaults apply (RTSP :8554,
 # RTMP :1935, HLS :8888).
 hlsAlwaysRemux: true
-# fMP4 instead of MPEG-TS: the mpegts variant's HLS muxer crashed with
-# "unable to extract DTS: too many reordered frames" on the looped RTSP
-# feed (soak finding, see docs/ROADMAP.md). fmp4 stores DTS/PTS explicitly
-# and showed 0 crashes over 13 min in isolation. v1.12.2 does not allow
-# hlsVariant per-path, so it applies to every path (fine — only cam_c's
-# Falcon ingest is HLS; the web players handle fmp4).
-hlsVariant: fmp4
+# MPEG-TS (original). fMP4 was tried but the muxer crash is load/UDP-driven,
+# not variant-driven (isolated mpegts is stable, live fmp4 crashes) — the fix
+# is -rtsp_transport tcp on the publishers (see start_testbed.sh).
+hlsVariant: mpegts
 # 500ms segments: 1s segments limited cam_c's preview content updates to
 # ~1/s (slideshow-like); 200ms broke the remux of the lossy RTSP feed.
 hlsSegmentDuration: 500ms
