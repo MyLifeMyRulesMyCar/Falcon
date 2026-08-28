@@ -41,6 +41,51 @@ smooth; the internet-HLS evidence above stands as the M1.3 validation.
   hours / overnight. Look for: `mem_mb` climbing (leak), any camera `restarts`
   growing in steady state, `mqtt_connected` flapping.
 
+### Soak finding — cam_c HLS restart churn (diagnosed)
+
+The soak surfaced steady cam_c (testbed HLS) restart churn (~1-2/min). Diagnosis:
+
+1. **Falcon restart reason** (`panel.log`): each churn = `Failed to reload
+   playlist 0` (after a variable 33s-25min healthy run) then three `404 Not
+   Found` backoffs → recovery. Restart bursts of 4 = the 1/2/4/8s backoff.
+2. **Root cause** (`testbed/mediamtx.log`): mediamtx's **MPEG-TS HLS muxer
+   crashes** with `unable to extract DTS: too many reordered frames (28)` on
+   the looped `-c copy` RTSP testbed feed — for cam_a, cam_c AND cam_d (all
+   RTSP-published cameras), every ~2-5 min. Each crash → muxer restart → a
+   few seconds with no playlist → any HLS reader (Falcon cam_c or a bare
+   ffmpeg) hits `Failed to reload playlist 0` → restart.
+3. **Not Falcon, not contention** (isolation): a bare `ffmpeg` reading
+   `http://127.0.0.1:8888/cam_c/index.m3u8` fails identically (52
+   playlist-failure lines over ~25min) with no Falcon involved.
+4. **Memory is independent**: soak `mem_mb` climbs/drops regardless of restart
+   bursts; the big ~900MB drop happened during a restart plateau → shared root
+   cause refuted. The memory sawtooth is a separate phenomenon (allocation
+   churn in the panel tree, not a restart-driven leak).
+
+**Recommended fix (tested in isolation, NOT yet applied — applying it needs a
+testbed restart, which stops the running soak):** switch the testbed mediamtx
+to `hlsVariant: fmp4` in `testbed/mediamtx.yml`. An isolated mediamtx on
+`fmp4` showed **0 muxer crashes over 13 min / 19 consecutive clean 30s HLS
+reads**, vs mpegts crashing every few minutes. This is a testbed-harness
+change, not a Falcon code change — `stream_worker.py` is not involved. Apply
++ confirm cam_c churn stops after the soak completes.
+
+## 10-hour soak — completed
+
+1193 samples, **10.0 h**. cam_a / cam_b / cam_d: **0 restarts** throughout
+(~30 fps). cam_c (testbed HLS): 863 restarts — the diagnosed mediamtx mpegts
+muxer crash, not a new finding. **MQTT: 0 disconnects.** No camera ever went
+not-alive. Memory: bounded sawtooth 0.95-2.3 GB (no monotonic leak; last 3h
+oscillated 1.2-1.9 GB). Raw log: `docs/soak_10h.log`.
+
+## fmp4 fix — applied + confirming
+
+`hlsVariant: fmp4` applied to `testbed/mediamtx.yml` (top-level: v1.12.2 does
+not allow `hlsVariant` per-path — the "unknown field" error). Restarted the
+stack. A 30-min focused confirmation run writes `/tmp/soak_confirm.log`:
+acceptance = cam_c restarts ~0 (vs ~1-2/min baseline), cam_a/b/d ~30 fps 0
+restarts, MQTT connected, memory bounded. Result appended when it lands.
+
 ## Open (owned by external inputs or future work)
 
 | Item | Blocker | Owner |
