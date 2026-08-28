@@ -213,6 +213,44 @@ def create_app(
     def stream_annotated(name: str):
         return stream_route(name, True)
 
+    @app.get("/api/cameras/<name>/snapshot.jpg")
+    def snapshot(name: str):
+        """One fresh JPEG (raw or annotated) for browser previews.
+
+        The dashboard polls this instead of a persistent MJPEG stream — a
+        single short GET per second is robust to browser connection limits,
+        proxies, and table-rebuild aborts that make long-lived multipart
+        streams render black in some browsers. Serves the encoder's shared
+        slot (zero in-process encode); falls back to the raw slot when an
+        annotated frame isn't available, and to in-process encoding only when
+        no slots exist (tests).
+        """
+        if name not in cameras:
+            return jsonify({"error": f"unknown camera: {name}"}), 404
+        annotated = request.args.get("annotated", "0") == "1"
+        if preview_slots is not None:
+            kind = "ann" if annotated else "raw"
+            jpg, _ = read_slot(preview_slots, name, kind)
+            if not jpg and kind == "ann":
+                jpg, _ = read_slot(preview_slots, name, "raw")
+            if not jpg:
+                return Response(status=204)
+            return Response(jpg, mimetype="image/jpeg")
+        result = frame_store.read(name) if frame_store is not None else None
+        if result is None:
+            return Response(status=204)
+        frame, _ = result
+        boxes = None
+        zones = None
+        if annotated:
+            if boxes_present(name):
+                boxes = [
+                    d.get("bbox", (0, 0, 0, 0))
+                    for d in detection_stats[name]["last_detections"]
+                ]
+            zones = [(z.polygon, z.name) for z in cameras[name].zones]
+        return Response(preview_encode(frame, boxes=boxes, zones=zones), mimetype="image/jpeg")
+
     @app.get("/api/cameras")
     def list_cameras():
         rows = []

@@ -687,6 +687,31 @@ def test_publish_toggles_and_rows():
     assert cam_a["publish_detections"] is True
 
 
+def test_snapshot_serves_jpeg_and_404():
+    import numpy as np
+
+    from nvr.control.api import create_app
+
+    cameras = make_cameras()
+    mgr = StubManager(cameras)
+    store = _FakeFrameStore()
+    store.set("cam_a", np.zeros((360, 640, 3), dtype=np.uint8))
+    app = create_app(mgr, cameras, frame_store=store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    res = client.get("/api/cameras/cam_a/snapshot.jpg")
+    assert res.status_code == 200
+    assert res.mimetype == "image/jpeg"
+    assert res.data[:2] == b"\xff\xd8"  # JPEG SOI
+
+    res = client.get("/api/cameras/cam_a/snapshot.jpg?annotated=1")
+    assert res.status_code == 200
+    assert res.data[:2] == b"\xff\xd8"
+
+    assert client.get("/api/cameras/nope/snapshot.jpg").status_code == 404
+
+
 def test_camera_save_preserves_output_sections(tmp_path):
     from nvr.config import HttpOutputConfig, MqttConfig, load_config
     from nvr.control.api import create_app

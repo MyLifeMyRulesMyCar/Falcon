@@ -112,6 +112,36 @@ const tbody = document.querySelector("#cameras tbody");
 const imgCache = {};
 const boxesMode = {};  // camera name -> draw boxes on preview?
 
+// Preview thumbnails poll a single-JPEG snapshot endpoint every second
+// instead of holding a persistent MJPEG stream: short GETs are robust to
+// browser connection limits, proxies, and the 2s table-rebuild (detaching a
+// live multipart <img> aborts its stream in some browsers -> black preview).
+const snapshots = {};  // camera name -> { img, timer }
+
+function snapshotUrl(name, annotated) {
+  return "/api/cameras/" + encodeURIComponent(name) + "/snapshot.jpg?annotated="
+    + (annotated ? "1" : "0") + "&t=" + Date.now();
+}
+
+function tickSnapshot(name) {
+  const s = snapshots[name];
+  if (!s) return;
+  s.img.src = snapshotUrl(name, !!boxesMode[name]);
+}
+
+function startSnapshot(name, img) {
+  const s = snapshots[name];
+  if (s) { s.img = img; return; }  // already polling; just refresh the element ref
+  const timer = setInterval(() => tickSnapshot(name), 1000);
+  snapshots[name] = { img, timer };
+  tickSnapshot(name);
+}
+
+function stopSnapshot(name) {
+  const s = snapshots[name];
+  if (s) { clearInterval(s.timer); delete snapshots[name]; }
+}
+
 function previewCell(cam) {
   const td = document.createElement("td");
   const img = imgCache[cam.name] || (imgCache[cam.name] = document.createElement("img"));
@@ -119,7 +149,7 @@ function previewCell(cam) {
   img.height = 90;
   img.style.border = "1px solid #444";
   if (cam.alive) {
-    img.src = "/stream/" + cam.name + (boxesMode[cam.name] ? "/annotated" : "") + ".mjpg";
+    startSnapshot(cam.name, img);
   } else {
     img.removeAttribute("src");
   }
@@ -127,8 +157,8 @@ function previewCell(cam) {
   btn.textContent = boxesMode[cam.name] ? "boxes: ON" : "boxes: OFF";
   btn.onclick = () => {
     boxesMode[cam.name] = !boxesMode[cam.name];
-    img.src = "/stream/" + cam.name + (boxesMode[cam.name] ? "/annotated" : "") + ".mjpg";
     btn.textContent = boxesMode[cam.name] ? "boxes: ON" : "boxes: OFF";
+    tickSnapshot(cam.name);
   };
   td.append(img, document.createElement("br"), btn);
   return td;
@@ -339,9 +369,10 @@ function refresh() {
     .then((res) => res.json())
     .then((cams) => {
       // Drop previews for cameras that are no longer running (kills their
-      // MJPEG connections); live ones are reused from imgCache.
+      // snapshot pollers); live ones are reused from imgCache.
       for (const [name, img] of Object.entries(imgCache)) {
         if (!cams.some((c) => c.name === name && c.alive)) {
+          stopSnapshot(name);
           img.removeAttribute("src");
           delete imgCache[name];
         }
