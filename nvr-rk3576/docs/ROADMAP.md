@@ -98,6 +98,25 @@ UDP), cam_a/b/d 0/0/4 restarts, all ~30 fps, **0 mediamtx muxer crashes**,
 MQTT connected, memory bounded (~1.1-1.4 GB). Acceptance met — the cam_c
 churn item is **CLOSED**.
 
+## Post-TCP-fix resource confirmation — completed
+
+3h run (357 samples, ~180 min), same monitor format as `soak_10h.log`. Raw
+log: `docs/soak_confirm_tcp.log`.
+
+- **Memory range: 1.33-1.91 GB** (vs. 0.95-2.3 GB pre-fix) — **consistent**.
+  Two sawtooth cycles observed (climb → drop → plateau, e.g. 1662 MB held
+  flat for ~65 min, then 1844 → 1332). No monotonic drift.
+- **Restarts: cam_a 0, cam_c 0, cam_b 0, cam_d 2** (startup-only) across the
+  full run; no camera ever not-alive. cam_c (the former churn camera) 0.
+- **MQTT: 0 disconnects.** All cameras ~30 fps.
+- TCP transport is **resource-neutral**: same bounded memory band, no
+  restart/MQTT/connectivity impact. Item status: **CLOSED** — every internal
+  item is now closed.
+
+**systemd auto-start — deferred past v1.0.** Manual startup
+(`scripts/start_all.sh`) is sufficient for this stage; revisit when
+unattended-reboot survival is actually needed.
+
 ## Open (owned by external inputs or future work)
 
 | Item | Blocker | Owner |
