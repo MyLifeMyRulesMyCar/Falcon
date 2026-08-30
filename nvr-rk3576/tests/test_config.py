@@ -67,6 +67,16 @@ cameras:
     url: rtsp://a
 """
 
+CLIPS_YAML = """
+clips:
+  base_dir: /var/lib/nvr/clips
+  max_per_camera: 50
+  duration_sec: 15
+cameras:
+  - name: cam_a
+    url: rtsp://a
+"""
+
 
 def _write(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "config.yaml"
@@ -299,4 +309,45 @@ def test_write_config_round_trips_snapshots(tmp_path):
     write_config(str(out), cfg.cameras, cfg.mqtt, cfg.http_output, cfg.snapshots)
     loaded = load_config(str(out))
     assert loaded.snapshots == cfg.snapshots
+    assert loaded.cameras == cfg.cameras
+
+
+def test_clips_parse(tmp_path):
+    cfg = load_config(str(_write(tmp_path, CLIPS_YAML)))
+    assert cfg.clips is not None
+    assert cfg.clips.base_dir == "/var/lib/nvr/clips"
+    assert cfg.clips.max_per_camera == 50
+    assert cfg.clips.duration_sec == 15.0
+
+
+def test_clips_absent_by_default(tmp_path):
+    cfg = load_config(str(_write(tmp_path, VALID_YAML)))
+    assert cfg.clips is None
+
+
+def test_clips_defaults(tmp_path):
+    y = "clips:\n  base_dir: c\ncameras:\n  - name: a\n    url: rtsp://a\n"
+    cfg = load_config(str(_write(tmp_path, y)))
+    assert cfg.clips.base_dir == "c"
+    assert cfg.clips.max_per_camera == 30
+    assert cfg.clips.duration_sec == 10.0
+
+
+def test_invalid_clips_raises(tmp_path):
+    with pytest.raises(ConfigError) as ei:
+        load_config(
+            str(_write(
+                tmp_path,
+                "clips:\n  duration_sec: -1\ncameras:\n  - name: a\n    url: rtsp://a\n",
+            ))
+        )
+    assert "clips" in str(ei.value)
+
+
+def test_write_config_round_trips_clips(tmp_path):
+    cfg = load_config(str(_write(tmp_path, CLIPS_YAML)))
+    out = tmp_path / "out.yaml"
+    write_config(str(out), cfg.cameras, cfg.mqtt, cfg.http_output, cfg.snapshots, cfg.clips)
+    loaded = load_config(str(out))
+    assert loaded.clips == cfg.clips
     assert loaded.cameras == cfg.cameras

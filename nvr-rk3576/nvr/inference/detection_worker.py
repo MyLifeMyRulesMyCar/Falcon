@@ -31,6 +31,7 @@ from nvr.inference.npu_pool import NpuCorePool
 from nvr.ingest.manager import IngestManager
 from nvr.motion.motion_gate import MotionGate
 from nvr.output.annotate import draw_annotations
+from nvr.output.clip_store import ClipStore
 from nvr.output.dispatcher import OutputDispatcher
 from nvr.output.snapshot_store import SnapshotStore
 from nvr.tracking.centroid_tracker import CentroidTracker
@@ -147,6 +148,7 @@ class DetectionWorker(multiprocessing.Process):
         publish_zone_events_flags: Optional[dict] = None,
         publish_detections_flags: Optional[dict] = None,
         snapshot_store: Optional[SnapshotStore] = None,
+        clip_store: Optional[ClipStore] = None,
     ):
         super().__init__(name="detection-worker")
         self.camera_names = camera_names
@@ -172,6 +174,8 @@ class DetectionWorker(multiprocessing.Process):
         )
         # v1.1 event snapshots. None -> no snapshot files (smoke tests etc.).
         self.snapshot_store = snapshot_store
+        # v1.3 post-roll event clips. None -> no clips.
+        self.clip_store = clip_store
 
     def run(self) -> None:
         gates = {name: MotionGate() for name in self.camera_names}
@@ -209,6 +213,10 @@ class DetectionWorker(multiprocessing.Process):
                         work_queue,
                         update_stats,
                     )
+                # v1.3: keep clip capture advancing independent of any single
+                # camera's events (no-op when nothing is recording).
+                if self.clip_store is not None:
+                    self.clip_store.poll()
 
         def core_worker(core: int) -> None:
             detector = ObjectDetector(pool)
@@ -259,6 +267,13 @@ class DetectionWorker(multiprocessing.Process):
                                     )
                                     snapshot_path = self.snapshot_store.save(
                                         name, ev.zone, ev.track_id, annotated, ev.timestamp
+                                    )
+                                # v1.3: post-roll clip for this event (a
+                                # second event while one is recording simply
+                                # extends the current clip — see ClipStore).
+                                if self.clip_store is not None:
+                                    self.clip_store.start_clip(
+                                        name, ev.zone, ev.track_id, ev.timestamp
                                     )
                                 self.dispatcher.publish_zone_event(
                                     name, ev, snapshot_path=snapshot_path

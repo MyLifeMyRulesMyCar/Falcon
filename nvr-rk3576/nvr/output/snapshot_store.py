@@ -6,11 +6,12 @@ a real bound. OpenCV is deliberately not used (see ROADMAP); annotated frames
 arrive BGR and are flipped + saved via PIL.
 """
 
-import glob
 import os
 
 import numpy as np
 from PIL import Image
+
+from nvr.output.rotation import rotate_by_count
 
 _JPEG_QUALITY = 85
 
@@ -38,12 +39,5 @@ class SnapshotStore:
         # BGR (ingest convention) -> RGB for PIL save.
         img = Image.fromarray(np.ascontiguousarray(annotated_frame[:, :, ::-1]))
         img.save(os.path.join(self.base_dir, rel_path), quality=_JPEG_QUALITY)
-        self._rotate(cam_dir)
+        rotate_by_count(cam_dir, self.max_per_camera, "*.jpg")
         return rel_path
-
-    def _rotate(self, cam_dir: str):
-        """Remove the oldest files in ``cam_dir`` until at most
-        ``max_per_camera`` remain."""
-        files = sorted(glob.glob(os.path.join(cam_dir, "*.jpg")), key=os.path.getmtime)
-        while len(files) > self.max_per_camera:
-            os.remove(files.pop(0))

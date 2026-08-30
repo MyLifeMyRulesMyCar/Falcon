@@ -15,6 +15,7 @@ from PIL import Image
 
 from nvr.config import (
     CameraConfig,
+    ClipConfig,
     ConfigError,
     HttpOutputConfig,
     MqttConfig,
@@ -25,6 +26,7 @@ from nvr.config import (
 from nvr.control.preview_encoder import preview_encode, read_slot
 from nvr.inference.detector import Detection
 from nvr.ingest.manager import IngestManager
+from nvr.output.clip_store import ClipStore
 from nvr.output.snapshot_store import SnapshotStore
 
 _JPEG_QUALITY = 80
@@ -59,6 +61,29 @@ def _camera_dims(frame_store, name: str):
         return None
 
 
+def _serve_under(base_dir: str, camera: str, filename: str):
+    """Serve ``base_dir/camera/filename`` behind the traversal guard shared by
+    the snapshot and clip routes.
+
+    ``camera``/``filename`` come straight from the URL. Path separators and
+    ``..`` are rejected outright (routing already splits on "/", so a raw
+    ``../`` traversal would otherwise 404 before reaching this guard — this
+    keeps the rejection explicit and reachable), and the resolved path is
+    additionally checked to stay under ``base_dir`` before the file is
+    served. The guard matters now, not retroactively when the panel is
+    exposed past localhost.
+    """
+    if ".." in camera or ".." in filename or os.sep in filename:
+        return "", 403
+    base = os.path.abspath(base_dir)
+    path = os.path.abspath(os.path.join(base, camera, filename))
+    if not (path == base or path.startswith(base + os.sep)):
+        return "", 403
+    if not os.path.isfile(path):
+        return "", 404
+    return send_file(path)
+
+
 def create_app(
     manager: IngestManager,
     cameras: dict[str, CameraConfig],
@@ -77,6 +102,8 @@ def create_app(
     http_output_config: Optional[HttpOutputConfig] = None,
     snapshot_store: Optional[SnapshotStore] = None,
     snapshot_config: Optional[SnapshotConfig] = None,
+    clip_store: Optional[ClipStore] = None,
+    clip_config: Optional[ClipConfig] = None,
 ) -> Flask:
     """Build the Flask app. ``cameras`` is the live name->config dict the
     panel edits; the manager must own the same CameraConfig objects.
@@ -274,27 +301,18 @@ def create_app(
 
     @app.get("/snapshots/<camera>/<filename>")
     def get_snapshot(camera: str, filename: str):
-        """Serve one event snapshot by camera + filename.
-
-        ``camera``/``filename`` come straight from the URL. Path separators
-        and ``..`` are rejected outright (routing already splits on "/", so a
-        raw ``../`` traversal would otherwise 404 before reaching this guard
-        — this keeps the rejection explicit and reachable), and the resolved
-        path is additionally checked to stay under ``snapshot_store.base_dir``
-        before the file is served. The guard matters now, not retroactively
-        when the panel is exposed past localhost.
-        """
+        """Serve one event snapshot by camera + filename."""
         if snapshot_store is None:
             return "", 404
-        if ".." in camera or ".." in filename or os.sep in filename:
-            return "", 403
-        base = os.path.abspath(snapshot_store.base_dir)
-        path = os.path.abspath(os.path.join(base, camera, filename))
-        if not (path == base or path.startswith(base + os.sep)):
-            return "", 403
-        if not os.path.isfile(path):
+        return _serve_under(snapshot_store.base_dir, camera, filename)
+
+    @app.get("/clips/<camera>/<filename>")
+    def get_clip(camera: str, filename: str):
+        """Serve one event clip (mp4) by camera + filename. Same guard as the
+        snapshot route — one traversal check shared, not copied."""
+        if clip_store is None:
             return "", 404
-        return send_file(path)
+        return _serve_under(clip_store.base_dir, camera, filename)
 
     @app.get("/api/cameras")
     def list_cameras():
@@ -380,7 +398,7 @@ def create_app(
         cameras[name].zones = parsed
         if config_path:
             try:
-                write_config(config_path, list(cameras.values()), mqtt_config, http_output_config, snapshot_config)
+                write_config(config_path, list(cameras.values()), mqtt_config, http_output_config, snapshot_config, clip_config)
             except (ConfigError, OSError) as exc:
                 cameras[name].zones = old  # revert
                 return jsonify({"error": f"failed to persist config: {exc}"}), 500
@@ -476,7 +494,7 @@ def create_app(
         if config_path:
             try:
                 write_config(
-                    config_path, list(cameras.values()), new_config, http_output_config, snapshot_config
+                    config_path, list(cameras.values()), new_config, http_output_config, snapshot_config, clip_config
                 )
             except (ConfigError, OSError) as exc:
                 return jsonify({"error": f"failed to persist config: {exc}"}), 500
@@ -567,7 +585,7 @@ def create_app(
         if config_path:
             prospective = [new_config if c.name == name else c for c in cameras.values()]
             try:
-                write_config(config_path, prospective, mqtt_config, http_output_config, snapshot_config)
+                write_config(config_path, prospective, mqtt_config, http_output_config, snapshot_config, clip_config)
             except (ConfigError, OSError) as exc:
                 return jsonify({"error": f"failed to persist config: {exc}"}), 500
         try:

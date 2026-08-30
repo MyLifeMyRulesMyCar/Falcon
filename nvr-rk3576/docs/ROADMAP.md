@@ -139,3 +139,21 @@ unattended-reboot survival is actually needed.
   units remain available if auto-start is ever wanted.
 - **requirements.txt** now reflects every import (`rknn-toolkit-lite2==2.3.2`
   added; opencv is NOT used — drawing is PIL/numpy).
+- **v1.1/v1.3 event evidence: snapshots + post-roll clips, and the encoder
+  reality.** Zone events produce a snapshot (`.jpg`, annotated) and a
+  post-roll clip (`.mp4`, ~6fps from the shared preview broadcast — not the
+  motion-gated detection path). Both are count-capped per camera via the
+  shared `rotate_by_count` (oldest-by-mtime); served under `/snapshots/...`
+  and `/clips/...` behind one shared traversal guard. The clip encoder is
+  **`h264_rkmpp`, not `libx264`** — this board's ffmpeg build has no libx264
+  (see `ffmpeg_rebuild_step1.md`); rkmpp is hardware, so mux CPU is minimal.
+  Verified live: clips mux at the *measured* preview rate and playback at
+  correct speed (duration ≈ configured `duration_sec`).
+- **v1.2 platform abstraction (NPU core count/model path) — deliberately
+  skipped.** The future RK3588 NVR will be a separate `nvr-rk3588` folder,
+  so the three hardcoded NPU spots (core mask dict, model path, two
+  `core_worker` threads) are a trivial fork edit done during real bring-up,
+  not speculative config now; a real platform abstraction would also have to
+  cover the hardcoded RK3576 CPU-core affinity (`_A72_CORES`), the install
+  script, and the ffmpeg rebuild. Revisit if cross-fork diff-identity is
+  ever wanted.

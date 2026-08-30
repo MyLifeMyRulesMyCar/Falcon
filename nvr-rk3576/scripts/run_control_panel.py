@@ -22,6 +22,7 @@ from nvr.inference.detection_worker import DetectionWorker
 from nvr.ingest.frame_broadcast import LatestFrameStore
 from nvr.ingest.manager import IngestManager
 from nvr.output.dispatcher import OutputDispatcher
+from nvr.output.clip_store import ClipStore
 from nvr.output.http_publisher import HttpPublisher
 from nvr.output.mqtt_publisher import MqttPublisher
 from nvr.output.snapshot_store import SnapshotStore
@@ -51,6 +52,15 @@ def main() -> None:
     manager = IngestManager(
         config.cameras, frame_store=frame_store
     )  # cameras start stopped
+    # v1.3 post-roll event clips: reads the shared preview blocks from the
+    # worker process (frame_store's RawValues are fork-shared).
+    clip_cfg = config.clips
+    clip_store = ClipStore(
+        clip_cfg.base_dir if clip_cfg else "clips",
+        frame_store,
+        clip_cfg.max_per_camera if clip_cfg else 30,
+        clip_cfg.duration_sec if clip_cfg else 10.0,
+    )
     stats = multiprocessing.Manager().dict()
     detection_flags = multiprocessing.Manager().dict()
 
@@ -96,6 +106,7 @@ def main() -> None:
         publish_zone_events_flags,
         publish_detections_flags,
         snapshot_store=snapshot_store,
+        clip_store=clip_store,
     )
     worker.start()
 
@@ -135,6 +146,7 @@ def main() -> None:
             publish_zone_events_flags,
             publish_detections_flags,
             snapshot_store=snapshot_store,
+            clip_store=clip_store,
         )
         worker.start()
 
@@ -168,6 +180,8 @@ def main() -> None:
         http_output_config=config.http_output,
         snapshot_store=snapshot_store,
         snapshot_config=config.snapshots,
+        clip_store=clip_store,
+        clip_config=config.clips,
     )
     print(f"control panel: http://{args.host}:{args.port}  ({len(cameras)} cameras)")
     app.run(host=args.host, port=args.port, threaded=True)

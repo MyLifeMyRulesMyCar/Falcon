@@ -38,3 +38,11 @@ http_output:
 snapshots:
   base_dir: snapshots
   max_per_camera: 200
+
+# v1.3 event clips — post-roll mp4 per zone event, ~6fps (the shared preview
+# broadcast cadence), hardware-encoded with h264_rkmpp. duration_sec of
+# footage after the alert; retained per camera up to max_per_camera.
+clips:
+  base_dir: clips
+  max_per_camera: 30
+  duration_sec: 10

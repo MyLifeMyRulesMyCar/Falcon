@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nvr.config import CameraConfig, ZoneConfig
 from nvr.control.api import create_app
+from nvr.output.clip_store import ClipStore
 from nvr.output.snapshot_store import SnapshotStore
 
 CAMERAS = {
@@ -780,6 +781,62 @@ def test_snapshot_route_404_without_store():
     app = create_app(StubManager(cameras), cameras)
     app.config["TESTING"] = True
     assert app.test_client().get("/snapshots/cam_a/x.jpg").status_code == 404
+
+
+def _app_with_clip_store(tmp_path):
+    cameras = make_cameras()
+    store = ClipStore(str(tmp_path), object(), max_per_camera=10)
+    app = create_app(StubManager(cameras), cameras, clip_store=store)
+    app.config["TESTING"] = True
+    return app.test_client(), tmp_path
+
+
+def test_clip_route_serves_file(tmp_path):
+    client, tmp_path = _app_with_clip_store(tmp_path)
+    cam_dir = tmp_path / "cam_a"
+    cam_dir.mkdir()
+    (cam_dir / "entry_1700000000_1.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    res = client.get("/clips/cam_a/entry_1700000000_1.mp4")
+    assert res.status_code == 200
+    assert res.data.startswith(b"\x00\x00\x00\x18ftypmp42")
+
+
+def test_clip_route_blocks_dotdot(tmp_path):
+    client, _ = _app_with_clip_store(tmp_path)
+    assert client.get("/clips/cam_a/../../etc/passwd").status_code in (403, 404)
+    assert client.get("/clips/cam_a/..").status_code == 403
+
+
+def test_clip_route_404_missing_file(tmp_path):
+    client, _ = _app_with_clip_store(tmp_path)
+    assert client.get("/clips/cam_a/nope.mp4").status_code == 404
+
+
+def test_clip_route_404_without_store():
+    cameras = make_cameras()
+    app = create_app(StubManager(cameras), cameras)
+    app.config["TESTING"] = True
+    assert app.test_client().get("/clips/cam_a/x.mp4").status_code == 404
+
+
+def test_camera_save_preserves_clips_section(tmp_path):
+    from nvr.config import ClipConfig, load_config
+
+    cfg_path = str(tmp_path / "config.yaml")
+    cameras = make_cameras()
+    clip_cfg = ClipConfig(base_dir="clips", max_per_camera=30, duration_sec=10.0)
+    app = create_app(
+        StubManager(cameras),
+        cameras,
+        config_path=cfg_path,
+        clip_config=clip_cfg,
+    )
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    assert client.put("/api/cameras/cam_a/zones", json=[]).status_code == 200
+    loaded = load_config(cfg_path)
+    assert loaded.clips == clip_cfg
 
 
 def test_camera_save_preserves_snapshots_section(tmp_path):
