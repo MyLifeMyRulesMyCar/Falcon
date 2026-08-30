@@ -15,8 +15,10 @@ def _utc_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
-def build_zone_event_payload(camera: str, event: ZoneEvent) -> dict:
-    return {
+def build_zone_event_payload(
+    camera: str, event: ZoneEvent, snapshot_path: str | None = None
+) -> dict:
+    payload = {
         "camera": camera,
         "event_type": "zone_warning",
         "zone": event.zone,
@@ -26,6 +28,9 @@ def build_zone_event_payload(camera: str, event: ZoneEvent) -> dict:
         "bbox": list(event.bbox_xyxy),
         "timestamp": _utc_iso(event.timestamp),
     }
+    if snapshot_path:
+        payload["snapshot_path"] = snapshot_path
+    return payload
 
 
 def build_detection_summary_payload(

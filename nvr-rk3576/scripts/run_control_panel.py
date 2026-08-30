@@ -24,6 +24,7 @@ from nvr.ingest.manager import IngestManager
 from nvr.output.dispatcher import OutputDispatcher
 from nvr.output.http_publisher import HttpPublisher
 from nvr.output.mqtt_publisher import MqttPublisher
+from nvr.output.snapshot_store import SnapshotStore
 
 
 def main() -> None:
@@ -35,6 +36,13 @@ def main() -> None:
 
     config = load_config(args.config)
     cameras = {c.name: c for c in config.cameras}
+    # v1.1 event snapshots: one annotated .jpg per zone event, count-capped
+    # per camera (rotation happens on save, inside the worker).
+    snap_cfg = config.snapshots
+    snapshot_store = SnapshotStore(
+        snap_cfg.base_dir if snap_cfg else "snapshots",
+        snap_cfg.max_per_camera if snap_cfg else 200,
+    )
     # Must exist before start(): stream workers inherit the shared blocks
     # at fork time. Blocks are allocated lazily per camera on first write,
     # with that camera's own probed frame shape.
@@ -87,6 +95,7 @@ def main() -> None:
         publish_configs,
         publish_zone_events_flags,
         publish_detections_flags,
+        snapshot_store=snapshot_store,
     )
     worker.start()
 
@@ -125,6 +134,7 @@ def main() -> None:
             publish_configs,
             publish_zone_events_flags,
             publish_detections_flags,
+            snapshot_store=snapshot_store,
         )
         worker.start()
 
@@ -156,6 +166,8 @@ def main() -> None:
         publish_detections_flags=publish_detections_flags,
         mqtt_config=config.mqtt,
         http_output_config=config.http_output,
+        snapshot_store=snapshot_store,
+        snapshot_config=config.snapshots,
     )
     print(f"control panel: http://{args.host}:{args.port}  ({len(cameras)} cameras)")
     app.run(host=args.host, port=args.port, threaded=True)

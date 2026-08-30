@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nvr.config import CameraConfig, ZoneConfig
 from nvr.control.api import create_app
+from nvr.output.snapshot_store import SnapshotStore
 
 CAMERAS = {
     "cam_a": CameraConfig(name="cam_a", url="rtsp://a"),
@@ -741,3 +742,61 @@ def test_camera_save_preserves_output_sections(tmp_path):
     assert loaded.mqtt.host == "h"
     assert loaded.http_output.url == "http://x"
     assert "cam_x" in [c.name for c in loaded.cameras]
+
+
+def _app_with_store(tmp_path):
+    cameras = make_cameras()
+    store = SnapshotStore(str(tmp_path), max_per_camera=10)
+    app = create_app(StubManager(cameras), cameras, snapshot_store=store)
+    app.config["TESTING"] = True
+    return app.test_client(), tmp_path
+
+
+def test_snapshot_route_serves_file(tmp_path):
+    client, tmp_path = _app_with_store(tmp_path)
+    cam_dir = tmp_path / "cam_a"
+    cam_dir.mkdir()
+    (cam_dir / "entry_1700000000_1.jpg").write_bytes(b"\xff\xd8fake")
+    res = client.get("/snapshots/cam_a/entry_1700000000_1.jpg")
+    assert res.status_code == 200
+    assert res.data == b"\xff\xd8fake"
+
+
+def test_snapshot_route_blocks_dotdot(tmp_path):
+    client, _ = _app_with_store(tmp_path)
+    # A raw ../ traversal never reaches the handler (routing splits on "/"
+    # -> 404, still never serves a file); the guard itself rejects "..".
+    assert client.get("/snapshots/cam_a/../../etc/passwd").status_code in (403, 404)
+    assert client.get("/snapshots/cam_a/..").status_code == 403
+
+
+def test_snapshot_route_404_missing_file(tmp_path):
+    client, _ = _app_with_store(tmp_path)
+    assert client.get("/snapshots/cam_a/nope.jpg").status_code == 404
+
+
+def test_snapshot_route_404_without_store():
+    cameras = make_cameras()
+    app = create_app(StubManager(cameras), cameras)
+    app.config["TESTING"] = True
+    assert app.test_client().get("/snapshots/cam_a/x.jpg").status_code == 404
+
+
+def test_camera_save_preserves_snapshots_section(tmp_path):
+    from nvr.config import SnapshotConfig, load_config
+
+    cfg_path = str(tmp_path / "config.yaml")
+    cameras = make_cameras()
+    snap_cfg = SnapshotConfig(base_dir="snaps", max_per_camera=50)
+    app = create_app(
+        StubManager(cameras),
+        cameras,
+        config_path=cfg_path,
+        snapshot_config=snap_cfg,
+    )
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    assert client.put("/api/cameras/cam_a/zones", json=[]).status_code == 200
+    loaded = load_config(cfg_path)
+    assert loaded.snapshots == snap_cfg

@@ -7,7 +7,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from nvr.config import ZoneConfig
 from nvr.control.preview_encoder import make_slots, preview_encode, read_slot
+from nvr.inference.detector import Detection
 
 
 def test_slot_round_trip():
@@ -31,9 +33,27 @@ def test_slot_round_trip():
 
 def test_preview_encode_downscales_720p_and_scales_boxes():
     frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-    jpg = preview_encode(frame, boxes=[(100, 100, 200, 200)])
+    det = Detection(class_name="person", confidence=0.9, bbox_xyxy=(100, 100, 200, 200))
+    jpg = preview_encode(frame, detections=[det])
     assert jpg[:2] == b"\xff\xd8"
     assert len(jpg) < 100_000  # downscaled, not a 720p JPEG
+
+
+def test_preview_encode_draws_zones_and_highlight():
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    zone = ZoneConfig(
+        name="entry",
+        polygon=[(160.0, 260.0), (480.0, 260.0), (480.0, 360.0), (160.0, 360.0)],
+        trigger_classes=["person"],
+        dwell_time_sec=2.0,
+        cooldown_sec=30.0,
+    )
+    det = Detection(class_name="person", confidence=0.9, bbox_xyxy=(100, 100, 200, 200))
+    jpg = preview_encode(frame, detections=[det], zones=[zone], highlight_zone="entry")
+    assert jpg[:2] == b"\xff\xd8"
+    # Highlighted frame differs from the plain annotated one.
+    plain = preview_encode(frame, detections=[det], zones=[zone])
+    assert jpg != plain
 
 
 def test_slots_isolated_per_camera():

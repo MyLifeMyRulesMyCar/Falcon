@@ -58,6 +58,15 @@ cameras:
     url: rtsp://a
 """
 
+SNAPSHOT_YAML = """
+snapshots:
+  base_dir: /var/lib/nvr/snapshots
+  max_per_camera: 50
+cameras:
+  - name: cam_a
+    url: rtsp://a
+"""
+
 
 def _write(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "config.yaml"
@@ -252,3 +261,42 @@ def test_camera_publish_fields_parse(tmp_path):
     assert c.publish_zone_events is False
     assert c.publish_detections is True
     assert c.detection_publish_interval_sec == 2.5
+
+
+def test_snapshots_parse(tmp_path):
+    cfg = load_config(str(_write(tmp_path, SNAPSHOT_YAML)))
+    assert cfg.snapshots is not None
+    assert cfg.snapshots.base_dir == "/var/lib/nvr/snapshots"
+    assert cfg.snapshots.max_per_camera == 50
+
+
+def test_snapshots_absent_by_default(tmp_path):
+    cfg = load_config(str(_write(tmp_path, VALID_YAML)))
+    assert cfg.snapshots is None
+
+
+def test_snapshots_defaults(tmp_path):
+    y = "snapshots:\n  base_dir: snaps\ncameras:\n  - name: a\n    url: rtsp://a\n"
+    cfg = load_config(str(_write(tmp_path, y)))
+    assert cfg.snapshots.base_dir == "snaps"
+    assert cfg.snapshots.max_per_camera == 200
+
+
+def test_invalid_snapshots_raises(tmp_path):
+    with pytest.raises(ConfigError) as ei:
+        load_config(
+            str(_write(
+                tmp_path,
+                "snapshots:\n  base_dir: ''\ncameras:\n  - name: a\n    url: rtsp://a\n",
+            ))
+        )
+    assert "snapshots" in str(ei.value)
+
+
+def test_write_config_round_trips_snapshots(tmp_path):
+    cfg = load_config(str(_write(tmp_path, SNAPSHOT_YAML)))
+    out = tmp_path / "out.yaml"
+    write_config(str(out), cfg.cameras, cfg.mqtt, cfg.http_output, cfg.snapshots)
+    loaded = load_config(str(out))
+    assert loaded.snapshots == cfg.snapshots
+    assert loaded.cameras == cfg.cameras

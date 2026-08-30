@@ -32,3 +32,9 @@ http_output:
   url: http://127.0.0.1:9999/nvr/events
   timeout_sec: 3
   enabled: false
+
+# v1.1 event snapshots — one annotated .jpg per zone event, retained per
+# camera up to max_per_camera (oldest removed first).
+snapshots:
+  base_dir: snapshots
+  max_per_camera: 200

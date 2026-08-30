@@ -27,8 +27,10 @@ class OutputDispatcher:
         self.http = http
         self.topic_prefix = topic_prefix
 
-    def publish_zone_event(self, camera: str, event: ZoneEvent) -> None:
-        payload = build_zone_event_payload(camera, event)
+    def publish_zone_event(
+        self, camera: str, event: ZoneEvent, snapshot_path: Optional[str] = None
+    ) -> None:
+        payload = build_zone_event_payload(camera, event, snapshot_path)
         if self.mqtt:
             self.mqtt.publish(f"{self.topic_prefix}/{camera}/zone_event", payload)
         if self.http:

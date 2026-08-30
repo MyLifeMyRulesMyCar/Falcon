@@ -30,7 +30,9 @@ from nvr.inference.detector import ObjectDetector
 from nvr.inference.npu_pool import NpuCorePool
 from nvr.ingest.manager import IngestManager
 from nvr.motion.motion_gate import MotionGate
+from nvr.output.annotate import draw_annotations
 from nvr.output.dispatcher import OutputDispatcher
+from nvr.output.snapshot_store import SnapshotStore
 from nvr.tracking.centroid_tracker import CentroidTracker
 from nvr.zones.zone_engine import ZoneEngine, event_to_dict
 
@@ -144,6 +146,7 @@ class DetectionWorker(multiprocessing.Process):
         publish_configs: Optional[dict] = None,
         publish_zone_events_flags: Optional[dict] = None,
         publish_detections_flags: Optional[dict] = None,
+        snapshot_store: Optional[SnapshotStore] = None,
     ):
         super().__init__(name="detection-worker")
         self.camera_names = camera_names
@@ -167,6 +170,8 @@ class DetectionWorker(multiprocessing.Process):
         self.publish_detections_flags = (
             publish_detections_flags if publish_detections_flags is not None else {}
         )
+        # v1.1 event snapshots. None -> no snapshot files (smoke tests etc.).
+        self.snapshot_store = snapshot_store
 
     def run(self) -> None:
         gates = {name: MotionGate() for name in self.camera_names}
@@ -240,8 +245,24 @@ class DetectionWorker(multiprocessing.Process):
                         # drop-oldest, so a down broker/endpoint can't stall
                         # this NPU-adjacent thread.
                         if self.publish_zone_events_flags.get(name, True):
+                            zones = self.zone_configs.get(name, [])
                             for ev in events:
-                                self.dispatcher.publish_zone_event(name, ev)
+                                # Snapshot write is deliberately a blocking
+                                # disk save here; event frequency is dwell/
+                                # cooldown-limited (~1 per 30s), so an async
+                                # writer would be over-engineering for this
+                                # rate.
+                                snapshot_path = None
+                                if self.snapshot_store is not None:
+                                    annotated = draw_annotations(
+                                        frame, detections, zones, highlight_zone=ev.zone
+                                    )
+                                    snapshot_path = self.snapshot_store.save(
+                                        name, ev.zone, ev.track_id, annotated, ev.timestamp
+                                    )
+                                self.dispatcher.publish_zone_event(
+                                    name, ev, snapshot_path=snapshot_path
+                                )
                         if self.publish_detections_flags.get(name, False) and detections:
                             interval = self.publish_configs.get(name, {}).get(
                                 "detection_publish_interval_sec", 5.0

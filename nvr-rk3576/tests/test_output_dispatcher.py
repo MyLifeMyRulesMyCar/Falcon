@@ -42,6 +42,23 @@ def test_zone_event_fans_out_identical_payload():
     assert payload["event_type"] == "zone_warning"
 
 
+def test_zone_event_payload_carries_snapshot_path():
+    m = _RecorderMqtt()
+    h = _RecorderHttp()
+    d = OutputDispatcher(m, h, "nvr")
+    d.publish_zone_event("cam_a", _event(), snapshot_path="cam_a/entry_1700000000_3.jpg")
+    _, mqtt_payload = m.items[0]
+    assert mqtt_payload["snapshot_path"] == "cam_a/entry_1700000000_3.jpg"
+    assert h.items[0]["snapshot_path"] == "cam_a/entry_1700000000_3.jpg"
+
+
+def test_zone_event_payload_without_snapshot_path():
+    m = _RecorderMqtt()
+    d = OutputDispatcher(m, None, "nvr")
+    d.publish_zone_event("cam_a", _event())
+    assert "snapshot_path" not in m.items[0][1]
+
+
 def test_detection_summary_fans_out():
     m = _RecorderMqtt()
     h = _RecorderHttp()

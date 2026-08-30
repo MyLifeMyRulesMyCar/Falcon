@@ -19,9 +19,12 @@ import time
 from typing import Optional
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
+from nvr.config import ZoneConfig
 from nvr.ingest.frame_broadcast import LatestFrameStore
+from nvr.inference.detector import Detection
+from nvr.output.annotate import draw_annotations
 
 _JPEG_QUALITY = 80
 _MAX_JPEG = 128 * 1024  # 640-wide JPEGs are ~25-40KB; headroom for 960px
@@ -67,57 +70,61 @@ def _put_slot(slots: dict, name: str, kind: str, jpg: bytes) -> None:
     gen.value += 1
 
 
-def preview_encode(frame_bgr: np.ndarray, boxes=None, zones=None) -> bytes:
-    """Stride-downscale to 320-wide with numpy, draw scaled boxes/zones, encode.
+def preview_encode(
+    frame_bgr: np.ndarray,
+    detections: Optional[list[Detection]] = None,
+    zones: Optional[list[ZoneConfig]] = None,
+    highlight_zone: Optional[str] = None,
+) -> bytes:
+    """Stride-downscale to 320-wide with numpy, draw, encode.
 
     The preview <img> renders at ~160px, so 320-wide is visually identical
     while costing ~4x less encode CPU — the difference between the encoder
     keeping up with the 8fps write cadence under full-system load and
     falling behind into jitter. No Pillow resize and no full-frame copies:
     a wide frame is downscaled by integer strides to a view (free), copied
-    only at the small size, and the boxes (in native coords) are scaled by
-    the same factor.
+    only at the small size, and the detections/zones (in native coords) are
+    scaled by the same factor.
 
-    ``zones`` is a list of ``(polygon, label)`` where polygon is a list of
-    (x, y) in the camera's native decoded resolution (same space as boxes);
-    each zone is outlined and labeled via ImageDraw.
+    Drawing is delegated to the shared
+    :func:`nvr.output.annotate.draw_annotations` renderer so the preview and
+    event snapshots share one implementation of "what does annotated look
+    like". ``highlight_zone`` renders that zone red (previews never set it).
     """
     factor = 1
     if frame_bgr.shape[1] > 320:
         factor = frame_bgr.shape[1] // 320
         small = frame_bgr[::factor, ::factor]
-        if boxes:
-            boxes = [(x1 / factor, y1 / factor, x2 / factor, y2 / factor)
-                     for x1, y1, x2, y2 in boxes]
+        if detections:
+            detections = [
+                Detection(
+                    d.class_name,
+                    d.confidence,
+                    tuple(v / factor for v in d.bbox_xyxy),
+                )
+                for d in detections
+            ]
         if zones:
             zones = [
-                ([(px / factor, py / factor) for px, py in poly], label)
-                for poly, label in zones
+                ZoneConfig(
+                    z.name,
+                    [(px / factor, py / factor) for px, py in z.polygon],
+                    z.trigger_classes,
+                    z.dwell_time_sec,
+                    z.cooldown_sec,
+                )
+                for z in zones
             ]
     else:
         small = frame_bgr
 
-    work = np.ascontiguousarray(small)  # the only copy; <=640 wide
-    if boxes:
-        for x1, y1, x2, y2 in boxes:
-            x1, y1 = max(0, int(x1)), max(0, int(y1))
-            x2 = min(work.shape[1], int(x2))
-            y2 = min(work.shape[0], int(y2))
-            if x2 <= x1 or y2 <= y1:
-                continue
-            # 2px green border strips (BGR); never fill interior.
-            work[y1:y2, x1 : x1 + 2, :] = (0, 255, 0)
-            work[y1:y2, x2 - 2 : x2, :] = (0, 255, 0)
-            work[y1 : y1 + 2, x1:x2, :] = (0, 255, 0)
-            work[y2 - 2 : y2, x1:x2, :] = (0, 255, 0)
+    if detections or zones:
+        work = draw_annotations(small, detections or [], zones or [], highlight_zone)
+    else:
+        work = np.ascontiguousarray(small)  # the only copy; <=640 wide
 
     rgb = np.ascontiguousarray(work[:, :, ::-1])
     img = Image.fromarray(rgb)
-    if zones:
-        draw = ImageDraw.Draw(img)
-        for poly, label in zones:
-            draw.polygon([(px, py) for px, py in poly], outline="cyan")
-            draw.text((poly[0][0], poly[0][1]), label, fill="cyan")
     buf = __import__("io").BytesIO()
     img.save(buf, format="JPEG", quality=_JPEG_QUALITY)
     return buf.getvalue()
@@ -153,7 +160,14 @@ class PreviewEncoder(multiprocessing.Process):
         dets = self.detection_stats.get(name, {}).get("last_detections", [])
         if not dets:
             return None
-        return [d.get("bbox", (0, 0, 0, 0)) for d in dets]
+        return [
+            Detection(
+                class_name=d.get("class_name", "?"),
+                confidence=d.get("confidence", 0.0),
+                bbox_xyxy=tuple(d.get("bbox", (0, 0, 0, 0))),
+            )
+            for d in dets
+        ]
 
     def _boxes_cached(self, name: str) -> Optional[list]:
         """Manager-proxy reads are the hot-loop bottleneck (they serialize
@@ -183,23 +197,19 @@ class PreviewEncoder(multiprocessing.Process):
                     continue
                 last[name] = gen
                 _put_slot(self.slots, name, "raw", preview_encode(view))
-                boxes = self._boxes_cached(name)
+                dets = self._boxes_cached(name)
                 # Annotate when there are detections to draw, or when the
                 # camera has zones (so the zone outline renders even before
                 # anything is detected inside it).
                 zone_list = self.zones.get(name, [])
-                if boxes or zone_list:
-                    key = repr((boxes, [(z.name, z.polygon) for z in zone_list]))
+                if dets or zone_list:
+                    key = repr((dets, [(z.name, z.polygon) for z in zone_list]))
                     if last_boxes.get(name) != key:
                         last_boxes[name] = key
                         _put_slot(
                             self.slots,
                             name,
                             "ann",
-                            preview_encode(
-                                view,
-                                boxes=boxes,
-                                zones=[(z.polygon, z.name) for z in zone_list],
-                            ),
+                            preview_encode(view, detections=dets, zones=zone_list),
                         )
             time.sleep(_POLL_S)

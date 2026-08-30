@@ -4,12 +4,13 @@ Dev-server only, no auth, bound to localhost by default — an operator tool
 for the bench, not something to expose past localhost/LAN.
 """
 
+import os
 import threading
 import time
 from typing import Optional
 
 import numpy as np
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_file
 from PIL import Image
 
 from nvr.config import (
@@ -17,11 +18,14 @@ from nvr.config import (
     ConfigError,
     HttpOutputConfig,
     MqttConfig,
+    SnapshotConfig,
     parse_zones,
     write_config,
 )
 from nvr.control.preview_encoder import preview_encode, read_slot
+from nvr.inference.detector import Detection
 from nvr.ingest.manager import IngestManager
+from nvr.output.snapshot_store import SnapshotStore
 
 _JPEG_QUALITY = 80
 _JPEG_POLL_S = 0.05
@@ -71,6 +75,8 @@ def create_app(
     publish_detections_flags: Optional[dict] = None,
     mqtt_config: Optional[MqttConfig] = None,
     http_output_config: Optional[HttpOutputConfig] = None,
+    snapshot_store: Optional[SnapshotStore] = None,
+    snapshot_config: Optional[SnapshotConfig] = None,
 ) -> Flask:
     """Build the Flask app. ``cameras`` is the live name->config dict the
     panel edits; the manager must own the same CameraConfig objects.
@@ -90,7 +96,11 @@ def create_app(
     ``restart_encoders`` re-forks the PreviewEncoder processes (called after
     zone or name/url edits so the encoder picks up the new config).
     ``config_path`` persists name/url/zones edits to config.yaml when set
-    (optional; absent for tests -> edits stay in-memory only)."""
+    (optional; absent for tests -> edits stay in-memory only).
+    ``snapshot_store`` serves GET /snapshots/<camera>/<filename> (optional;
+    absent -> that route 404s). ``snapshot_config`` is persisted to config.yaml
+    alongside the camera edits so the v1.1 ``snapshots:`` section survives a
+    panel save (optional; absent -> section not written)."""
     app = Flask(__name__, static_url_path="/static")
     detection_stats = detection_stats if detection_stats is not None else {}
     detection_flags = detection_flags if detection_flags is not None else {}
@@ -180,16 +190,20 @@ def create_app(
                 jpg = cached[1]
             else:
                 draw_ann = annotated and (boxes_present(name) or bool(cameras[name].zones))
-                boxes = None
+                detections = None
                 zones = None
                 if draw_ann:
                     if boxes_present(name):
-                        boxes = [
-                            d.get("bbox", (0, 0, 0, 0))
+                        detections = [
+                            Detection(
+                                class_name=d.get("class_name", "?"),
+                                confidence=d.get("confidence", 0.0),
+                                bbox_xyxy=tuple(d.get("bbox", (0, 0, 0, 0))),
+                            )
                             for d in detection_stats[name]["last_detections"]
                         ]
-                    zones = [(z.polygon, z.name) for z in cameras[name].zones]
-                jpg = preview_encode(frame_view, boxes=boxes, zones=zones)
+                    zones = cameras[name].zones
+                jpg = preview_encode(frame_view, detections=detections, zones=zones)
                 encode_cache[f"{annotated}:{name}"] = (gen, jpg)
             yield (
                 b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
@@ -240,16 +254,47 @@ def create_app(
         if result is None:
             return Response(status=204)
         frame, _ = result
-        boxes = None
+        detections = None
         zones = None
         if annotated:
             if boxes_present(name):
-                boxes = [
-                    d.get("bbox", (0, 0, 0, 0))
+                detections = [
+                    Detection(
+                        class_name=d.get("class_name", "?"),
+                        confidence=d.get("confidence", 0.0),
+                        bbox_xyxy=tuple(d.get("bbox", (0, 0, 0, 0))),
+                    )
                     for d in detection_stats[name]["last_detections"]
                 ]
-            zones = [(z.polygon, z.name) for z in cameras[name].zones]
-        return Response(preview_encode(frame, boxes=boxes, zones=zones), mimetype="image/jpeg")
+            zones = cameras[name].zones
+        return Response(
+            preview_encode(frame, detections=detections, zones=zones),
+            mimetype="image/jpeg",
+        )
+
+    @app.get("/snapshots/<camera>/<filename>")
+    def get_snapshot(camera: str, filename: str):
+        """Serve one event snapshot by camera + filename.
+
+        ``camera``/``filename`` come straight from the URL. Path separators
+        and ``..`` are rejected outright (routing already splits on "/", so a
+        raw ``../`` traversal would otherwise 404 before reaching this guard
+        — this keeps the rejection explicit and reachable), and the resolved
+        path is additionally checked to stay under ``snapshot_store.base_dir``
+        before the file is served. The guard matters now, not retroactively
+        when the panel is exposed past localhost.
+        """
+        if snapshot_store is None:
+            return "", 404
+        if ".." in camera or ".." in filename or os.sep in filename:
+            return "", 403
+        base = os.path.abspath(snapshot_store.base_dir)
+        path = os.path.abspath(os.path.join(base, camera, filename))
+        if not (path == base or path.startswith(base + os.sep)):
+            return "", 403
+        if not os.path.isfile(path):
+            return "", 404
+        return send_file(path)
 
     @app.get("/api/cameras")
     def list_cameras():
@@ -335,7 +380,7 @@ def create_app(
         cameras[name].zones = parsed
         if config_path:
             try:
-                write_config(config_path, list(cameras.values()), mqtt_config, http_output_config)
+                write_config(config_path, list(cameras.values()), mqtt_config, http_output_config, snapshot_config)
             except (ConfigError, OSError) as exc:
                 cameras[name].zones = old  # revert
                 return jsonify({"error": f"failed to persist config: {exc}"}), 500
@@ -431,7 +476,7 @@ def create_app(
         if config_path:
             try:
                 write_config(
-                    config_path, list(cameras.values()), new_config, http_output_config
+                    config_path, list(cameras.values()), new_config, http_output_config, snapshot_config
                 )
             except (ConfigError, OSError) as exc:
                 return jsonify({"error": f"failed to persist config: {exc}"}), 500
@@ -522,7 +567,7 @@ def create_app(
         if config_path:
             prospective = [new_config if c.name == name else c for c in cameras.values()]
             try:
-                write_config(config_path, prospective, mqtt_config, http_output_config)
+                write_config(config_path, prospective, mqtt_config, http_output_config, snapshot_config)
             except (ConfigError, OSError) as exc:
                 return jsonify({"error": f"failed to persist config: {exc}"}), 500
         try:

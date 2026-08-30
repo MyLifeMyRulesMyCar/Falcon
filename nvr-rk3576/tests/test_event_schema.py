@@ -39,6 +39,17 @@ def test_zone_event_payload_is_json_safe_and_shaped():
     assert "T" in payload["timestamp"] and payload["timestamp"].endswith("+00:00")
 
 
+def test_zone_event_payload_omits_snapshot_path_when_absent():
+    assert "snapshot_path" not in build_zone_event_payload("cam_a", _zone_event())
+
+
+def test_zone_event_payload_includes_snapshot_path_when_given():
+    payload = build_zone_event_payload(
+        "cam_a", _zone_event(), snapshot_path="cam_a/entry_1700000000_3.jpg"
+    )
+    assert payload["snapshot_path"] == "cam_a/entry_1700000000_3.jpg"
+
+
 def test_detection_summary_payload_is_json_safe_and_shaped():
     dets = [
         Detection(class_name="person", confidence=0.88, bbox_xyxy=(1.0, 2.0, 3.0, 4.0)),
