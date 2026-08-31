@@ -2,27 +2,27 @@
 
 Multi-camera NVR ingest layer for Radxa CM4 (RK3576).
 
-- **M0** — single-stream ingest: decode one network stream with
+- **v0.0** — single-stream ingest: decode one network stream with
   hardware-accelerated ffmpeg and push raw BGR frames onto a bounded queue.
-- **M1** — four streams over four protocols (RTSP/RTMP/HLS/HTTP-FLV) under
+- **v0.1** — four streams over four protocols (RTSP/RTMP/HLS/HTTP-FLV) under
   one `IngestManager`, with a local testbed, a smoke test, and a minimal
-  operator control panel (M1.1). Details in `docs/m1_ingest.md`.
-- **M2** — NPU object detection (YOLOv5s/COCO-80) gated by a per-camera
+  operator control panel (v0.1.1). Details in `docs/v0_1_ingest.md`.
+- **v0.2** — NPU object detection (YOLOv5s/COCO-80) gated by a per-camera
   motion detector, dual-core NPU parallelism, live detections in the
   control panel, and true-ingest instrumentation. Details in
-  `docs/m2_detection.md`.
-- **M4** — per-camera centroid tracking + polygon zones: dwell/cooldown
+  `docs/v0_2_detection.md`.
+- **v0.4** — per-camera centroid tracking + polygon zones: dwell/cooldown
   events surfaced in the panel and `/api/zone_events`, zone outlines drawn
   on the annotated stream, strict config validation, a Frigate-style UI zone
   editor (draw/reshape/move/delete on the live frame), and name/url/zones
   persisted back to `config/config.yaml`. Details in
-  `docs/m4_zones_tracking.md`.
-- **M5** — MQTT + HTTP output: zone events and opt-in, throttled detection
+  `docs/v0_4_zones_tracking.md`.
+- **v0.5** — MQTT + HTTP output: zone events and opt-in, throttled detection
   summaries as separate topics/content types, non-blocking bounded-queue
   publishers (a dead broker/endpoint never stalls detection), auto-reconnect,
   live MQTT/HTTP + per-camera content toggles in the panel, and MQTT
   settings (host/port/username/password) editable + persisted in the UI.
-  Details in `docs/m5_mqtt_http.md`.
+  Details in `docs/v0_5_mqtt_http.md`.
 
 ## Requirements
 
@@ -50,79 +50,23 @@ python -m venv .venv
 
 The ffmpeg binary is used as a subprocess; no Python decode library is involved.
 
-## Building ffmpeg from source
-
-If the system ffmpeg lacks rkmpp or HTTPS support, obtain an FFmpeg source tree
-separately and follow `docs/ffmpeg_rebuild_step1.md`; the short version is:
+## Usage
 
 ```bash
-sudo apt update
-sudo apt install -y libssl-dev
+pytest tests/                              # unit tests (no network)
 
-cd /path/to/ffmpeg-8.1.2
-./configure \
-    --enable-rkmpp \
-    --enable-libdrm \
-    --enable-openssl \
-    --enable-version3 \
-    --prefix=/usr/local \
-    --disable-doc \
-    --disable-debug
+./testbed/start_testbed.sh                 # v0.1: 4 simulated cameras
+python scripts/smoke_test_m1.py --duration 120    # per-camera fps/restarts
+python scripts/smoke_test_m1.py --duration 1800   # 30-min soak
 
-make -j$(nproc)
-sudo make install
+python scripts/verify_detector_m2.py       # v0.2: bus.jpg calibration gate (needs NPU)
+python scripts/smoke_test_m2.py --duration 120    # v0.2: ingest|infer fps, skip%, detections
+
+python scripts/run_control_panel.py        # v0.1.1/v0.2: http://127.0.0.1:5050
 ```
 
-Verify after install:
-
-```bash
-ffmpeg -decoders | grep rkmpp      # h264_rkmpp, hevc_rkmpp, ...
-ffmpeg -protocols | grep https      # https, tls
-ffprobe https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
-```
-
-## Fresh-board bring-up notes (Radxa OS 6.1.84, reproduced Aug 2026)
-
-Things that are easy to trip over on a clean board, all verified here:
-
-- **NPU device node.** This kernel registers the RKNPU driver as a *DRM*
-  device (`[drm] Initialized rknpu 0.9.8 ... on minor 1`) because
-  `CONFIG_ROCKCHIP_RKNPU_DRM_GEM=y`. There is **no `/dev/rknpu`**, no misc
-  device, and no udev rule to write. librknnrt >= 2.3.0 finds the NPU through
-  `/dev/dri/renderD129` (group `render`) on its own. Confirm the stack with
-  the C demo before touching Python:
-  ```bash
-  cd ~/rk3576_rknn_yolov5_demo && ./rknn_yolov5_demo \
-      ./model/yolov5s_relu_rk3576.rknn ./model/bus.jpg
-  # expect the 5 ground-truth detections: person 0.880/0.871/0.832, bus 0.705, person 0.301
-  ```
-- **Model + calibration asset.** `nvr/inference/model/*.rknn` is gitignored.
-  Get it from the Radxa demo tarball (which also provides `bus.jpg` —
-  `scripts/verify_detector_m2.py` reads it from `~/rk3576_rknn_yolov5_demo/model/`):
-  ```bash
-  curl -sL -o /tmp/rk3576_rknn_yolov5_demo.tar.gz \
-      https://dl.radxa.com/rock4/4d/images/rk3576_rknn_yolov5_demo.tar.gz
-  tar -xzf /tmp/rk3576_rknn_yolov5_demo.tar.gz -C ~/
-  mkdir -p nvr/inference/model && cp \
-      ~/rk3576_rknn_yolov5_demo/model/yolov5s_relu_rk3576.rknn \
-      nvr/inference/model/
-  ```
-- **mediamtx: pin v1.12.2.** The testbed binary is `testbed/mediamtx`
-  (gitignored). The current release (v1.20.x) crashes its HLS muxer on the
-  looped h264_rkmpp sample (`unable to extract DTS: too many reordered
-  frames`), dragging cam_c down to ~0-9 fps with repeated restarts. v1.12.2
-  keeps all four cameras at ~30 fps / 0 restarts.
-- **Network quirks on this board.** GitHub *release-asset* downloads (Azure
-  blob) and Google-hosted endpoints (proxy.golang.org, go.dev/dl) stall
-  mid-transfer, while GitHub API/codeload, PyPI, ffmpeg.org, dl.radxa.com and
-  the Debian mirrors are fine. If a release download hangs, route it through
-  a mirror, e.g.
-  `curl -L -o mediamtx.tar.gz https://ghproxy.net/https://github.com/bluenviron/mediamtx/releases/download/v1.12.2/mediamtx_v1.12.2_linux_arm64.tar.gz`
-- **Paths / venv.** The docs and systemd units assume the repo lives at
-  `/home/radxa/falcon/...`. On this machine it is `/home/radxa/Falcon`,
-  bridged with `ln -s /home/radxa/Falcon /home/radxa/falcon`. The venv sits
-  at the repo root (`/home/radxa/Falcon/.venv`, gitignored) so the systemd
-  `ExecStart` paths and `scripts/run_panel.sh` work as written.
+The v0.0 smoke test (`scripts/smoke_test_m0.py`) is unchanged but now uses
+`cam_a` from the config, so the testbed must be running.
 
 ## Configuration
 
@@ -147,24 +91,6 @@ cameras:
 Public streams can go offline without notice; swap any URL via the panel or
 this file. cam_b is a VOD MP4 (decodes as fast as the board allows — fps
 spikes and it replays on EOF); cam_c is a VOD HLS (replays on EOF too).
-
-## Usage
-
-```bash
-pytest tests/                              # unit tests (no network)
-
-./testbed/start_testbed.sh                 # M1: 4 simulated cameras
-python scripts/smoke_test_m1.py --duration 120    # per-camera fps/restarts
-python scripts/smoke_test_m1.py --duration 1800   # 30-min soak
-
-python scripts/verify_detector_m2.py       # M2: bus.jpg calibration gate (needs NPU)
-python scripts/smoke_test_m2.py --duration 120    # M2: ingest|infer fps, skip%, detections
-
-python scripts/run_control_panel.py        # M1.1/M2: http://127.0.0.1:5050
-```
-
-The M0 smoke test (`scripts/smoke_test_m0.py`) is unchanged but now uses
-`cam_a` from the config, so the testbed must be running.
 
 ## Operations
 
@@ -208,10 +134,30 @@ auto-starts all 4 cameras via `scripts/start_cameras.sh`. The panel runs as
 a `Type=simple` foreground process, so it is managed by systemd
 (`Restart=on-failure`) and its logs land in the journal.
 
-## M1 — 4-stream mixed-protocol ingest
+## Event evidence — snapshots + clips (v1.1 / v1.3 / v1.4)
+
+Snapshots, post-roll clips, and the events gallery all build on the v0.4 zone events:
+
+- **v1.1 — event snapshots**: each zone alert writes an annotated `.jpg`
+  (fired zone highlighted red, other zones cyan) via the shared
+  `draw_annotations()` renderer; served at `/snapshots/<camera>/<file>`.
+  Full write-up: `docs/v1_1_event_snapshots.md`.
+- **v1.3 — post-roll event clips**: each alert also records ~`duration_sec`
+  of ~6fps footage from the shared preview broadcast and muxes it
+  (h264_rkmpp) at the *measured* rate into an `.mp4`; served at
+  `/clips/<camera>/<file>`. Full write-up: `docs/v1_3_event_clips.md`.
+- **v1.4 — events gallery**: the panel's per-camera `events` button opens a
+  grid pairing each snapshot with its clip (when muxed), with no dead
+  links as files rotate away. Full write-up: `docs/v1_4_events_gallery_ui.md`.
+
+Both stores are count-capped per camera (`snapshots.max_per_camera`,
+`clips.max_per_camera` in `config/config.yaml`) and rotate oldest-by-mtime
+via the shared `rotate_by_count()`.
+
+## v0.1 — 4-stream mixed-protocol ingest
 
 One `IngestManager` runs one `StreamWorker` per camera, each with its own
-bounded frame queue and restart counter. See `docs/m1_ingest.md` for the
+bounded frame queue and restart counter. See `docs/v0_1_ingest.md` for the
 full write-up (testbed, manager API, control panel, known pitfalls).
 
 Verified on the board:
@@ -222,10 +168,10 @@ Verified on the board:
   zero steady-state restarts — mediamtx is pinned to **v1.12.2** (v1.20.x's
   strict HLS muxer crashes on the looped h264_rkmpp sample; see bring-up notes).
 - 30-min soak: 53k frames per camera at ~30 fps, `restarts: 0`, memory flat.
-- CPU budget for M2: ~63% of one core for 4x 640x360 decode+colorspace
+- CPU budget for v0.2: ~63% of one core for 4x 640x360 decode+colorspace
   (~2.4 cores projected for 4x 720p); Python ingest stack ~1.5 cores.
 
-## M2 — NPU detection + motion gate
+## v0.2 — NPU detection + motion gate
 
 One `DetectionWorker` owns both NPU cores: a feeder thread motion-gates
 frames from all cameras into a shared queue; two core threads (one per
@@ -239,12 +185,12 @@ NPU core) run the detector. The panel shows per-camera `infer fps`,
   (~1.8x); 4-camera combined ~12/s, capped by ingest demand, not NPU.
 - True ingest (decoder-counted) stays ~25-30 fps with detection active —
   the earlier "ingest regression" was a metric artifact.
-- pytest: 122 passed (the suite grew from 101 with M5).
+- pytest: 122 passed (the suite grew from 101 with v0.5).
 - Fresh-board reproduction (Aug 2026): identical bus.jpg gate score 0.029;
   live panel holds all four cameras at ~30 fps true ingest with zero
   steady-state restarts and per-camera infer ~12-20 fps (combined ~16-18/s).
 
-## Control panel (M1.1)
+## Control panel (v0.1.1)
 
 ```bash
 ./testbed/start_testbed.sh                 # 4 simulated cameras
@@ -258,7 +204,7 @@ a camera is running), and watch fps/frames/restarts. Each row has a
 Frigate-style zone editor (draw/reshape/move/delete polygons on the live
 frame, per-zone trigger classes/dwell/cooldown). Name/url/zones edits are
 persisted atomically to `config/config.yaml` and survive a panel restart
-(since M4.1; M1.1's in-memory-only limitation is lifted). A panel restart
+(since v0.4.1; v0.1.1's in-memory-only limitation is lifted). A panel restart
 still resets in-memory detection stats and tracking state.
 
 The panel binds `127.0.0.1` by default; to reach it from another machine on
@@ -275,12 +221,12 @@ StreamWorker (multiprocessing.Process, one per camera)
   read frame_size bytes -> np (h, w, 3) -> frame_queue (drop-oldest)
   on short read: exponential backoff (min(2**attempt, 30)s), respawn ffmpeg
 
-IngestManager (M1) — one queue + restart counter per camera, spawns/terminates
+IngestManager (v0.1) — one queue + restart counter per camera, spawns/terminates
   workers individually, drains queues (consume()) to advance frame counts.
 ```
 
-- Queue maxsize is chosen by the caller: 256 in the M0 smoke test, 16 in the
-  M1 manager (4 cameras x 16 x 0.7 MB frames keeps the worst-case buffer
+- Queue maxsize is chosen by the caller: 256 in the v0.0 smoke test, 16 in the
+  v0.1 manager (4 cameras x 16 x 0.7 MB frames keeps the worst-case buffer
   small on this board; drop-oldest still smooths consumer hiccups).
 
 - Decode is hw (rkmpp/MPP); the bgr24 colorspace conversion is done by
@@ -289,7 +235,7 @@ IngestManager (M1) — one queue + restart counter per camera, spawns/terminates
 - ffmpeg stderr is drained by a background thread so the pipe can't fill
   and deadlock long runs.
 
-## M0 acceptance (on the RK3576 board)
+## v0.0 acceptance (on the RK3576 board)
 
 1. `pytest tests/` green
 2. Smoke test FPS matches the FPS `_probe_stream` reports
@@ -298,5 +244,84 @@ IngestManager (M1) — one queue + restart counter per camera, spawns/terminates
    20s mid-run: worker logs a restart, backs off, resumes when reachable
 5. Point `config/config.yaml` at the real third-party stream — unchanged code
 
-Measured FPS and CPU per stream drive the M2 NPU/motion-gate budget
-(see `docs/m1_ingest.md` for the numbers).
+Measured FPS and CPU per stream drive the v0.2 NPU/motion-gate budget
+(see `docs/v0_1_ingest.md` for the numbers).
+## Advanced / bring-up
+
+### Building ffmpeg from source
+
+If the system ffmpeg lacks rkmpp or HTTPS support, obtain an FFmpeg source tree
+separately and follow `docs/ffmpeg_rebuild_step1.md`; the short version is:
+
+```bash
+sudo apt update
+sudo apt install -y libssl-dev
+
+cd /path/to/ffmpeg-8.1.2
+./configure \
+    --enable-rkmpp \
+    --enable-libdrm \
+    --enable-openssl \
+    --enable-version3 \
+    --prefix=/usr/local \
+    --disable-doc \
+    --disable-debug
+
+make -j$(nproc)
+sudo make install
+```
+
+Verify after install:
+
+```bash
+ffmpeg -decoders | grep rkmpp      # h264_rkmpp, hevc_rkmpp, ...
+ffmpeg -protocols | grep https      # https, tls
+ffprobe https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+```
+
+### Fresh-board bring-up notes (Radxa OS 6.1.84, reproduced Aug 2026)
+
+Things that are easy to trip over on a clean board, all verified here:
+
+- **NPU device node.** This kernel registers the RKNPU driver as a *DRM*
+  device (`[drm] Initialized rknpu 0.9.8 ... on minor 1`) because
+  `CONFIG_ROCKCHIP_RKNPU_DRM_GEM=y`. There is **no `/dev/rknpu`**, no misc
+  device, and no udev rule to write. librknnrt >= 2.3.0 finds the NPU through
+  `/dev/dri/renderD129` (group `render`) on its own. Confirm the stack with
+  the C demo before touching Python:
+  ```bash
+  cd ~/rk3576_rknn_yolov5_demo && ./rknn_yolov5_demo \
+      ./model/yolov5s_relu_rk3576.rknn ./model/bus.jpg
+  # expect the 5 ground-truth detections: person 0.880/0.871/0.832, bus 0.705, person 0.301
+  ```
+- **Model + calibration asset.** `nvr/inference/model/*.rknn` is gitignored.
+  Get it from the Radxa demo tarball (which also provides `bus.jpg` —
+  `scripts/verify_detector_m2.py` reads it from `~/rk3576_rknn_yolov5_demo/model/`):
+  ```bash
+  curl -sL -o /tmp/rk3576_rknn_yolov5_demo.tar.gz \
+      https://dl.radxa.com/rock4/4d/images/rk3576_rknn_yolov5_demo.tar.gz
+  tar -xzf /tmp/rk3576_rknn_yolov5_demo.tar.gz -C ~/
+  mkdir -p nvr/inference/model && cp \
+      ~/rk3576_rknn_yolov5_demo/model/yolov5s_relu_rk3576.rknn \
+      nvr/inference/model/
+  ```
+- **mediamtx: pin v1.12.2.** The testbed binary is `testbed/mediamtx`
+  (gitignored). The current release (v1.20.x) crashes its HLS muxer on the
+  looped h264_rkmpp sample (`unable to extract DTS: too many reordered
+  frames`), dragging cam_c down to ~0-9 fps with repeated restarts. v1.12.2
+  keeps all four cameras at ~30 fps / 0 restarts.
+- **Network quirks on this board.** GitHub *release-asset* downloads (Azure
+  blob) and Google-hosted endpoints (proxy.golang.org, go.dev/dl) stall
+  mid-transfer, while GitHub API/codeload, PyPI, ffmpeg.org, dl.radxa.com and
+  the Debian mirrors are fine. If a release download hangs, route it through
+  a mirror, e.g.
+  `curl -L -o mediamtx.tar.gz https://ghproxy.net/https://github.com/bluenviron/mediamtx/releases/download/v1.12.2/mediamtx_v1.12.2_linux_arm64.tar.gz`
+- **Paths / venv.** The docs and systemd units assume the repo lives at
+  `/home/radxa/falcon/...`. On this machine it is `/home/radxa/Falcon`,
+  bridged with `ln -s /home/radxa/Falcon /home/radxa/falcon`. The venv sits
+  at the repo root (`/home/radxa/Falcon/.venv`, gitignored) so the systemd
+  `ExecStart` paths and `scripts/run_panel.sh` work as written.
+
+## License
+
+MIT — see `LICENSE`.

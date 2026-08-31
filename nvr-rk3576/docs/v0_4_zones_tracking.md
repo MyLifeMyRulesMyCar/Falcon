@@ -1,6 +1,6 @@
-# M4 — Zones + Tracking
+# v0.4 — Zones + Tracking
 
-M4 adds per-camera centroid tracking (stable track IDs) and polygon "zones"
+v0.4 adds per-camera centroid tracking (stable track IDs) and polygon "zones"
 that fire events when a tracked object of a trigger class dwells inside them,
 all inside the two threads that already run in `DetectionWorker` — no new
 process, no new IPC. Events surface in the control panel and a dedicated
@@ -16,7 +16,7 @@ nvr/
   zones/
     zone_engine.py          # dwell/cooldown zone events from tracked objects
   inference/
-    detection_worker.py     # M4 state wired into core_worker (both NPU threads)
+    detection_worker.py     # v0.4 state wired into core_worker (both NPU threads)
   control/
     preview_encoder.py      # draws zone polygons + labels on the ann slot
     api.py                  # recent_zone_events + GET /api/zone_events
@@ -47,7 +47,7 @@ polygon >= 3 points, `dwell_time_sec > 0`, `cooldown_sec >= 0`, non-empty
 load, not as a silent never-firing zone.
 
 **Coordinate space:** polygons are in the camera's native decoded resolution
-(what the M1 probe reported — 640x360 for the local testbed), the same space
+(what the v0.1 probe reported — 640x360 for the local testbed), the same space
 `detector.detect()` maps detections back to and the annotated stream renders
 in. Not the model's 640x640 letterbox space. Get this wrong and zones look
 right but never trigger.
@@ -86,13 +86,13 @@ Trackers and zone engines are built per camera in `run()` (post-fork, so each
 worker lifetime — re-forked on start/stop/rename — starts with fresh state).
 Both `core_worker` threads can touch one camera's tracker/engine/stats
 concurrently (the shared work queue doesn't pin a camera to a core), which is
-the same hazard the M2.2 lock fix addressed for stats — so M4 reuses
+the same hazard the v0.2.2 lock fix addressed for stats — so v0.4 reuses
 `stats_locks[name]`, not a second lock. A corrupted track dict would silently
 wrong track IDs, worse than a crash, so this isn't optional.
 
 Events are stored via `event_to_dict()` as plain JSON-safe dicts in a
 `recent_zone_events` ring (capped at 20) inside each camera's stats — same
-reason M2.1 did this for detections (Manager dict crosses a process boundary).
+reason v0.2.1 did this for detections (Manager dict crosses a process boundary).
 Each event is also logged: `ZONE EVENT: cam/zone track=... class=... dwell=...s`.
 
 ## Panel / API
@@ -106,10 +106,10 @@ Each event is also logged: `ZONE EVENT: cam/zone track=... class=... dwell=...s`
   even before anything is detected inside it.
 - The panel's per-row "zone events" column shows the last two events.
 
-## M4.1 — UI zone editor + config persistence
+## v0.4.1 — UI zone editor + config persistence
 
 Zones (and camera name/url edits) are now edited in the panel and persisted —
-this lifts M1.1's "edits are in-memory only" limitation.
+this lifts v0.1.1's "edits are in-memory only" limitation.
 
 - **Editor** (per-camera **zones** button, Frigate-style): a modal overlays a
   live raw MJPEG frame with a canvas sized to the camera's native aspect
@@ -132,7 +132,7 @@ this lifts M1.1's "edits are in-memory only" limitation.
   (`restart_encoders`) so the new config takes effect immediately; zones
   carry across a camera rename.
 
-## Test results (as of M4.1)
+## Test results (as of v0.4.1)
 
 ```
 pytest tests/ -q
@@ -168,7 +168,7 @@ pytest tests/ -q
 ## Known limitations / next levers
 
 - Zones are configured per camera in `config/config.yaml` — but now editable
-  live in the panel's zone editor (M4.1), which persists them back to the
+  live in the panel's zone editor (v0.4.1), which persists them back to the
   file. Tuning a polygon means a few clicks, not a restart-by-hand.
 - Track IDs are per camera and reset whenever the DetectionWorker re-forks
   (start/stop/rename, or a zone save). Cross-camera consistency is out of scope.

@@ -1,9 +1,9 @@
-# M2 — NPU Detection + Motion Gate
+# v0.2 — NPU Detection + Motion Gate
 
-M2 adds real-time object detection (YOLOv5s, COCO-80) on the RK3576 NPU,
+v0.2 adds real-time object detection (YOLOv5s, COCO-80) on the RK3576 NPU,
 gated by a per-camera motion detector, with live results surfaced in the
-control panel (M2.1), dual-core NPU parallelism (M2.2), and an ingest-
-regression investigation that ended in a measurement fix (M2.3). Verified
+control panel (v0.2.1), dual-core NPU parallelism (v0.2.2), and an ingest-
+regression investigation that ended in a measurement fix (v0.2.3). Verified
 on the board end-to-end.
 
 ## Layout
@@ -93,7 +93,7 @@ DetectionWorker (one process; owns both NPU cores)
 - The panel prefers the worker's `total+skipped` as the frame count (the
   worker consumes every frame for the gate, starving the manager's drain
   counter), and the **true ingest** column comes from the decoder's own
-  `frames_decoded` counter (see M2.3).
+  `frames_decoded` counter (see v0.2.3).
 
 ## Performance work
 
@@ -107,7 +107,7 @@ DetectionWorker (one process; owns both NPU cores)
 | NMS | 0.4 ms | 0.4 ms | negligible |
 | **total** | **79 ms** | **~37-44 ms** | ~22-27 fps single-camera |
 
-### Dual-core parallelism (M2.2)
+### Dual-core parallelism (v0.2.2)
 
 - **GIL check** (threaded vs sequential inference, N=40): clean run
   **1.91x** (2.125 s -> 1.112 s) — the GIL releases during `inference()`;
@@ -120,14 +120,14 @@ DetectionWorker (one process; owns both NPU cores)
   The 4-camera cap is detection *demand* (ingest supply + motion gate), not
   NPU capacity.
 
-### Ingest regression investigation (M2.3)
+### Ingest regression investigation (v0.2.3)
 
 - The reported 8-15x ingest collapse under detection load was **a metric
   artifact**: with the DetectionWorker consuming every queue frame, the
   ingest column (worker `total+skipped`) was bounded by NPU backpressure,
   not decoder production.
 - Fix: a `frames_decoded` counter incremented in `StreamWorker`'s read loop
-  (additive; the M0 ffmpeg invocation untouched), surfaced via
+  (additive; the v0.0 ffmpeg invocation untouched), surfaced via
   `manager.stats()` -> API -> panel `fps` column and the smoke's
   `ingest_fps`. **True ingest with detection active: 25-30 fps on the
   local cameras — equal to or above ingest-only runs. No CPU contention,
@@ -135,7 +135,7 @@ DetectionWorker (one process; owns both NPU cores)
 - Also fixed: `MODEL_PATH` was cwd-relative (worker died on any launch
   outside `nvr-rk3576/`); now file-relative.
 
-## Test results (as of M2.3)
+## Test results (as of v0.2.3)
 
 ```
 pytest tests/ -q
@@ -143,7 +143,7 @@ pytest tests/ -q
 ```
 
 - 72 passed on the fresh-board rerun (Aug 2026) — the suite has grown since
-  the 57 in the original M2.3 write-up.
+  the 57 in the original v0.2.3 write-up.
 
 - `test_motion_gate.py` (5): identical frames skip; synthetic bright block
   triggers; below-threshold change does not; skip-counter forces a pass
@@ -153,10 +153,10 @@ pytest tests/ -q
   identity/scale/pad.
 - `test_detection_worker.py` (4): `_update_stats` JSON-safe detections,
   skipped path, mixed skip ratio, 3-detection cap.
-- M1/M1.1 suites still green (manager, control API, stream worker,
+- v0.1/v0.1.1 suites still green (manager, control API, stream worker,
   config).
 
-### Live panel run (4 cameras, after M2.3)
+### Live panel run (4 cameras, after v0.2.3)
 
 | camera | true ingest fps | infer fps | skip ratio | sample detections |
 |---|---|---|---|---|
@@ -187,5 +187,5 @@ steady-state restarts.
   demand rises.
 - No bounding-box overlays on live video (text detections in the panel
   only) — a separate feature.
-- Core-1 pose reservation is gone: the whole NPU serves detection; M3
+- Core-1 pose reservation is gone: the whole NPU serves detection; v0.3
   (pose) must re-plan (time-slicing or a separate pool instance).

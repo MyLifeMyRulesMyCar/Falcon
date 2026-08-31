@@ -1,6 +1,6 @@
-# Step 1 — Rebuild ffmpeg for M0 (HTTPS/TLS + rkmpp)
+# Step 1 — Rebuild ffmpeg for v0.0 (HTTPS/TLS + rkmpp)
 
-This document records the ffmpeg rebuild performed to satisfy the M0 ingest requirements on the RK3576 board.
+This document records the ffmpeg rebuild performed to satisfy the v0.0 ingest requirements on the RK3576 board.
 
 ## Goal
 

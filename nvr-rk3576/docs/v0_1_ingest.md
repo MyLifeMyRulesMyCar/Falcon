@@ -1,20 +1,20 @@
-# M1 — 4-Stream Mixed-Protocol Ingest
+# v0.1 — 4-Stream Mixed-Protocol Ingest
 
-M1 builds on M0's `StreamWorker` (unchanged internals: `-hwaccel drm`
+v0.1 builds on v0.0's `StreamWorker` (unchanged internals: `-hwaccel drm`
 decode, drop-oldest queue, exponential backoff, stderr drain) and runs N of
 them under an `IngestManager`, plus a local 4-protocol testbed and a minimal
-operator control panel (M1.1). Verified on the RK3576 board.
+operator control panel (v0.1.1). Verified on the RK3576 board.
 
 ## Layout
 
 ```
 nvr/
   ingest/
-    stream_worker.py      # M0: one ffmpeg decode pipeline per camera (unchanged)
-    manager.py            # M1: IngestManager — run N workers, per-camera control
+    stream_worker.py      # v0.0: one ffmpeg decode pipeline per camera (unchanged)
+    manager.py            # v0.1: IngestManager — run N workers, per-camera control
   control/
-    api.py                # M1.1: Flask routes over IngestManager
-    static/index.html     # M1.1: operator panel (vanilla JS, no build)
+    api.py                # v0.1.1: Flask routes over IngestManager
+    static/index.html     # v0.1.1: operator panel (vanilla JS, no build)
 testbed/                  # local 4-camera test harness
   mediamtx.yml            # 4 independent paths (cam_a..cam_d)
   start_testbed.sh        # mediamtx + 4 publishers, one PID file per camera
@@ -22,7 +22,7 @@ testbed/                  # local 4-camera test harness
   sample.mp4              # generated on first start (h264_rkmpp, 640x360, 1s GOP)
 scripts/
   smoke_test_m1.py        # drain all queues, print per-camera fps/restarts
-  run_control_panel.py    # M1.1: Flask dev server
+  run_control_panel.py    # v0.1.1: Flask dev server
 tests/                    # unit tests (no network, no subprocesses)
 ```
 
@@ -84,7 +84,7 @@ One worker + one bounded frame queue (`maxsize 16`) + one lock-free
   returns `{alive, frames_received, restart_count, last_frame_ts}` and is
   safe for never-started cameras.
 
-M1 touches to `stream_worker.py` (additive only): an optional
+v0.1 touches to `stream_worker.py` (additive only): an optional
 `restart_counter` argument incremented at each restart, and probe retry with
 backoff (`_probe_with_retry`) so a worker that starts while its camera is
 down survives instead of dying. The ffmpeg invocation and backoff logic are
@@ -104,7 +104,7 @@ untouched.
   setup (probe + keyframe sync + rkmpp init). RTSP starts in ~3 s. The panel
   and smoke outputs reflect this ramp.
 
-## M1.1 — operator control panel
+## v0.1.1 — operator control panel
 
 ```bash
 python scripts/run_control_panel.py          # http://127.0.0.1:5050
@@ -120,7 +120,7 @@ python scripts/run_control_panel.py          # http://127.0.0.1:5050
   state; `config/config.yaml` is never written. Config persistence is a
   future increment.
 
-## M1 acceptance — verified on the board
+## v0.1 acceptance — verified on the board
 
 1. `pytest tests/` — green (38 tests).
 2. All 4 cameras: climbing frame counts, non-zero fps, `restarts: 0` in
@@ -152,13 +152,13 @@ All four cameras again held ~30 fps with zero steady-state restarts (90s
 observation, cam_a/b/c/d `restart_count` frozen) on a clean Radxa OS 6.1.84
 board, with mediamtx pinned to v1.12.2 and the cam_d watchdog gated as above.
 
-### CPU budget for M2 (measured, /proc stat deltas over a stable window)
+### CPU budget for v0.2 (measured, /proc stat deltas over a stable window)
 
 - 4 decoders + bgr24 colorspace conversion: **~63% of one core** aggregate
   at 640x360 (~16% per stream; project ~4x, ~2.4 cores, for 4x720p).
 - Python ingest stack (queue pickling/transport): **~1.5 cores**.
 - Testbed publishers + mediamtx: ~1-2% each.
 
-Headroom for the M2 motion gate is comfortable; the Python transport
+Headroom for the v0.2 motion gate is comfortable; the Python transport
 (pickle over multiprocessing queues) is the dominant cost and the first
 thing to revisit if 720p ingest needs to share the board with NPU work.

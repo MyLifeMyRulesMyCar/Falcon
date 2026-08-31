@@ -1,6 +1,6 @@
-# M5 — MQTT + HTTP Output
+# v0.5 — MQTT + HTTP Output
 
-M5 pushes M4's debounced zone events and (opt-in, throttled) detection
+v0.5 pushes v0.4's debounced zone events and (opt-in, throttled) detection
 summaries to an MQTT broker and/or an HTTP webhook, as **two separate content
 types on separate topics/toggles** — a customer integrating with this wants
 zone alerts always, detection summaries only sometimes, and conflating them
@@ -49,14 +49,14 @@ http_output:
 `CameraConfig` gains `publish_zone_events` (default True), `publish_detections`
 (default False — opt-in, high volume) and `detection_publish_interval_sec`
 (default 5.0, the summary throttle). `write_config` persists the full document
-(cameras + mqtt + http_output), so camera saves never drop the M5 sections.
+(cameras + mqtt + http_output), so camera saves never drop the v0.5 sections.
 
 ## Event schema (single source of truth)
 
 Both transports consume only `event_schema.build_*` output, so "identical
 payloads on both transports" holds by construction.
 
-- `zone_warning` — the debounced M4 zone event: camera/zone/track_id/
+- `zone_warning` — the debounced v0.4 zone event: camera/zone/track_id/
   class_name/dwell_time_sec/bbox/timestamp (UTC ISO).
 - `detection_summary` — opt-in, throttled per camera: camera/detections
   (class_name/confidence/bbox)/timestamp. Summaries publish only when the
@@ -79,7 +79,7 @@ and dropped — no retry storm.
 - **Fork model**: the DetectionWorker is a forked process; publishers live in
   the panel and are inherited at fork. Their queues are `multiprocessing.Queue`
   (a `queue.Queue`'s lock/Condition does not survive fork — the child would
-  write a private deque the panel never reads, which is exactly why M0's frame
+  write a private deque the panel never reads, which is exactly why v0.0's frame
   queues use multiprocessing.Queue). The `enabled` flags are backed by a
   shared `multiprocessing.Value`, so the panel's live MQTT/HTTP toggles reach
   the worker immediately instead of snapshotting at fork.
@@ -88,7 +88,7 @@ and dropped — no retry storm.
 
 `OutputDispatcher` is built once in the panel and passed to the
 DetectionWorker. Inside `core_worker`'s existing per-camera lock, right after
-M4's zone evaluation:
+v0.4's zone evaluation:
 
 - zone events → `publish_zone_event` for every fired event (gated by the live
   per-camera `publish_zone_events` flag);
@@ -114,7 +114,7 @@ endpoint can never stall the NPU threads.
   `POST /api/cameras/<name>/publish/<zone_events|detections>/<on|off>`.
   `/api/cameras` rows gain `publish_zone_events` / `publish_detections`.
 
-## Test results (as of M5)
+## Test results (as of v0.5)
 
 ```
 pytest tests/ -q

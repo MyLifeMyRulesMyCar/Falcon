@@ -1,4 +1,4 @@
-# Falcon v1.5 Roadmap — post-M5 close-out
+# Falcon Roadmap — post-M5 close-out (v1.0 era)
 
 Status of every item the M4/M5 close-out review raised, plus what's still open
 and who owns it. This is the honest gap list between "M5 merged" and "v1.0".
@@ -157,3 +157,29 @@ unattended-reboot survival is actually needed.
   cover the hardcoded RK3576 CPU-core affinity (`_A72_CORES`), the install
   script, and the ffmpeg rebuild. Revisit if cross-fork diff-identity is
   ever wanted.
+
+## Versioning note + upcoming milestones
+
+The M-series milestones (M0–M5, and the docs that covered them) were
+renamed to a v0.x scheme so the v1.x series has clean room:
+
+| Milestone | version |
+|---|---|
+| M0 (hardware decode) | v0.0 |
+| M1 (ingest + panel, M1.1) | v0.1 (v0.1.1) |
+| M2 (NPU detection, M2.1–M2.3) | v0.2 |
+| M3 (pose — deferred) | v0.3 |
+| M4 (zones/tracking, M4.1) | v0.4 |
+| M5 (MQTT/HTTP output) | v0.5 |
+| M5 close-out / validation | **v1.0** |
+| Event snapshots | **v1.1** (git `223a3d5`) |
+| Event clips (post-roll) | **v1.3** (git `1b8d899`) |
+| Events gallery + visual pass | **v1.4** (git `906305c`) |
+| Open-source readiness (LICENSE/README/audit) | **v1.5** — next |
+| Hardening | **v1.6** |
+| RK3588 port | **v2.0** (major-version marker; separate `nvr-rk3588` folder) |
+
+Git commit messages from the M-era keep their M-names (immutable history);
+this doc's soak narrative above also keeps its original M-terms since they
+reference those commits. v1.2 (NPU platform abstraction) was deliberately
+skipped — see the scope note above.
