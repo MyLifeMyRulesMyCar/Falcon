@@ -382,6 +382,54 @@ def create_app(
             }
         )
 
+    @app.get("/api/cameras/<name>/events")
+    def camera_events(name: str):
+        """Recent event evidence for one camera: snapshot (.jpg) and, if the
+        post-roll clip finished muxing before rotation caught up, clip (.mp4),
+        paired by the shared ``{zone}_{ts}_{track_id}`` filename stem both
+        stores use (zone names can contain underscores — entry_path does).
+        Built from a live directory listing, not recent_zone_events, so a
+        rotated-away file never shows up as a dead link."""
+        if name not in cameras:
+            return jsonify([]), 404
+
+        def _listing(store):
+            if store is None:
+                return {}
+            cam_dir = os.path.join(store.base_dir, name)
+            if not os.path.isdir(cam_dir):
+                return {}
+            return {os.path.splitext(f)[0]: f for f in os.listdir(cam_dir)}
+
+        snaps = _listing(snapshot_store)
+        clips = _listing(clip_store)
+        out = []
+        for stem in set(snaps) | set(clips):
+            parts = stem.split("_")
+            if len(parts) < 3:
+                continue  # stray file in a store dir, not an event
+            try:
+                zone = "_".join(parts[:-2])
+                ts = int(parts[-2])
+                track_id = int(parts[-1])
+            except ValueError:
+                continue
+            out.append(
+                {
+                    "zone": zone,
+                    "timestamp": ts,
+                    "track_id": track_id,
+                    "snapshot": (
+                        f"/snapshots/{name}/{snaps[stem]}" if stem in snaps else None
+                    ),
+                    "clip": f"/clips/{name}/{clips[stem]}" if stem in clips else None,
+                }
+            )
+        # Time-major (newest first across zones), not the string order of the
+        # stems themselves.
+        out.sort(key=lambda e: (e["timestamp"], e["track_id"]), reverse=True)
+        return jsonify(out[:100])
+
     @app.put("/api/cameras/<name>/zones")
     def set_zones(name: str):
         """Replace a camera's zones (bulk, same shape as config.yaml)."""

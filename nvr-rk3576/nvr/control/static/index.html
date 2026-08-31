@@ -4,16 +4,24 @@
 <meta charset="utf-8">
 <title>NVR control panel</title>
 <style>
-  body { font-family: monospace; margin: 2em; background: #111; color: #ddd; }
-  h1 { font-size: 1.2em; }
+  body { font-family: monospace; margin: 2em; background: #111; color: #ddd; line-height: 1.45; }
+  h1 { font-size: 1.35em; margin: 0 0 4px 0; }
+  h2 { font-size: 1.1em; margin: 0 0 10px 0; }
   table { border-collapse: collapse; width: 100%; max-width: 1100px; }
-  th, td { border: 1px solid #333; padding: 6px 10px; text-align: left; }
+  th, td { border: 1px solid #333; padding: 8px 12px; text-align: left; }
   th { background: #222; }
+  /* Visual column-group dividers: identity 1-3 / controls 4-8 / stats 9-17. */
+  thead th:nth-child(8), tbody td:nth-child(8) { border-right: 2px solid #4a4a4a; }
+  thead th:nth-child(4), tbody td:nth-child(4) { border-left: 2px solid #4a4a4a; }
+  thead th:nth-child(-n+3), tbody td:nth-child(-n+3) { background: rgba(255,255,255,0.03); }
   input[type=text] { background: #1a1a1a; color: #ddd; border: 1px solid #444; padding: 3px; width: 100%; }
   input:disabled, button:disabled { opacity: 0.4; }
+  .btn { padding: 5px 12px; margin: 2px; background: #1f1f1f; color: #ddd;
+         border: 1px solid #4a4a4a; border-radius: 4px; cursor: pointer; font: inherit; }
+  .btn:hover:not(:disabled) { background: #2a2a2a; border-color: #666; }
   .badge { padding: 2px 8px; border-radius: 3px; font-size: 0.85em; }
-  .running { background: #1d5c1d; }
-  .stopped { background: #5c1d1d; }
+  .running { background: #2f7d2f; }
+  .stopped { background: #7d2f2f; }
   .note { color: #888; font-size: 0.85em; }
   .error { color: #ff8080; font-size: 0.85em; }
   .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.75);
@@ -30,8 +38,15 @@
                      border: 1px solid #444; padding: 3px; }
   .output-bar { display: flex; gap: 8px; align-items: center; margin: 10px 0 4px 0; }
   .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  .dot.on { background: #1d8a1d; }
+  .dot.on { background: #2ea82e; }
   .dot.off { background: #555; }
+  .events-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+                 gap: 12px; margin: 10px 0; }
+  .events-grid figure { margin: 0; border: 1px solid #333; background: #111; padding: 8px; }
+  .events-grid img, .events-grid video { width: 100%; display: block; }
+  .events-grid img { cursor: pointer; }
+  .events-grid figcaption { font-size: 0.85em; color: #aaa; margin-top: 6px; }
+  .events-empty { color: #888; font-size: 0.9em; padding: 12px 0; }
   #mqtt-host, #mqtt-port, #mqtt-prefix { width: 160px; }
   #mqtt-user, #mqtt-pass { width: 140px; }
 </style>
@@ -40,18 +55,19 @@
 <h1>NVR control panel</h1>
 <div class="note">name/url/zones and MQTT settings edits are persisted to config/config.yaml.</div>
 <div class="output-bar">
-  <button id="out-mqtt">MQTT: --</button>
+  <button id="out-mqtt" class="btn">MQTT: --</button>
   <span id="out-mqtt-dot" class="dot off"></span>
-  <button id="out-http">HTTP: --</button>
-  <button id="out-mqtt-settings">MQTT settings</button>
+  <button id="out-http" class="btn">HTTP: --</button>
+  <button id="out-mqtt-settings" class="btn">MQTT settings</button>
   <span id="out-status" class="note"></span>
 </div>
 <table id="cameras">
   <thead>
     <tr>
-      <th>name</th><th>url</th><th></th><th></th><th></th><th></th><th></th>
+      <th>name</th><th>url</th><th>preview</th>
+      <th></th><th></th><th></th><th></th><th></th>
       <th>status</th><th>fps</th><th>frames</th><th>restarts</th>
-      <th>infer fps</th><th>skip%</th><th>detections</th><th>zone events</th><th>preview</th>
+      <th>infer fps</th><th>skip%</th><th>detections</th><th>zone events</th><th></th>
     </tr>
   </thead>
   <tbody></tbody>
@@ -66,9 +82,9 @@
       <canvas id="zone-canvas"></canvas>
     </div>
     <div class="zone-toolbar">
-      <button id="zone-new">New zone</button>
-      <button id="zone-finish">Finish polygon</button>
-      <button id="zone-delete">Delete zone</button>
+      <button id="zone-new" class="btn">New zone</button>
+      <button id="zone-finish" class="btn">Finish polygon</button>
+      <button id="zone-delete" class="btn">Delete zone</button>
       <span id="zone-status" class="note"></span>
     </div>
     <div class="zone-edit">
@@ -78,8 +94,8 @@
       <label>cooldown (s) <input id="zone-edit-cooldown" type="number" min="0" step="0.1"></label>
     </div>
     <div class="zone-toolbar">
-      <button id="zone-save">Save zones</button>
-      <button id="zone-close">Cancel</button>
+      <button id="zone-save" class="btn">Save zones</button>
+      <button id="zone-close" class="btn">Cancel</button>
     </div>
   </div>
 </div>
@@ -95,9 +111,20 @@
       <label>password <input id="mqtt-pass" type="password" autocomplete="new-password"></label>
     </div>
     <div class="zone-toolbar">
-      <button id="mqtt-save">Save</button>
-      <button id="mqtt-close">Cancel</button>
+      <button id="mqtt-save" class="btn">Save</button>
+      <button id="mqtt-close" class="btn">Cancel</button>
       <span id="mqtt-status" class="note"></span>
+    </div>
+  </div>
+</div>
+
+<div id="events-modal" class="modal" style="display:none">
+  <div class="modal-box">
+    <h2 id="events-title">Events</h2>
+    <div class="events-grid" id="events-grid"></div>
+    <div class="zone-toolbar">
+      <button id="events-close" class="btn">Close</button>
+      <span id="events-status" class="note"></span>
     </div>
   </div>
 </div>
@@ -154,6 +181,7 @@ function previewCell(cam) {
     img.removeAttribute("src");
   }
   const btn = document.createElement("button");
+  btn.className = "btn";
   btn.textContent = boxesMode[cam.name] ? "boxes: ON" : "boxes: OFF";
   btn.onclick = () => {
     boxesMode[cam.name] = !boxesMode[cam.name];
@@ -167,7 +195,7 @@ function previewCell(cam) {
 function errorRow(msg) {
   const tr = document.createElement("tr");
   const td = document.createElement("td");
-  td.colSpan = 15;
+  td.colSpan = 17;
   td.className = "error";
   td.textContent = msg;
   tr.appendChild(td);
@@ -195,28 +223,34 @@ function row(cam) {
   urlTd.appendChild(urlInput);
 
   const saveBtn = document.createElement("button");
+  saveBtn.className = "btn";
   saveBtn.textContent = "Save";
   saveBtn.disabled = running;
   const startBtn = document.createElement("button");
+  startBtn.className = "btn";
   startBtn.textContent = "Start";
   startBtn.disabled = running;
   const stopBtn = document.createElement("button");
+  stopBtn.className = "btn";
   stopBtn.textContent = "Stop";
   stopBtn.disabled = !running;
 
   // Independent of Start/Stop: flips the DetectionWorker's per-camera flag
   // live (no re-fork); while stopped it just sets the default for next start.
   const detectBtn = document.createElement("button");
+  detectBtn.className = "btn";
   detectBtn.textContent = cam.detection_enabled ? "Detect: ON" : "Detect: OFF";
 
   // M5: per-camera output content toggles (zone events / detection summaries).
   const zBtn = document.createElement("button");
+  zBtn.className = "btn";
   zBtn.textContent = "Z:" + (cam.publish_zone_events ? "ON" : "OFF");
   zBtn.onclick = () => act(
     "/api/cameras/" + encodeURIComponent(cam.name) + "/publish/zone_events/"
       + (cam.publish_zone_events ? "off" : "on"),
     { method: "POST" }, refresh);
   const dBtn = document.createElement("button");
+  dBtn.className = "btn";
   dBtn.textContent = "D:" + (cam.publish_detections ? "ON" : "OFF");
   dBtn.onclick = () => act(
     "/api/cameras/" + encodeURIComponent(cam.name) + "/publish/detections/"
@@ -232,8 +266,14 @@ function row(cam) {
   watchLink.target = "_blank";
 
   const zonesBtn = document.createElement("button");
+  zonesBtn.className = "btn";
   zonesBtn.textContent = "zones";
   zonesBtn.onclick = () => openZoneEditor(cam);
+
+  const eventsBtn = document.createElement("button");
+  eventsBtn.className = "btn";
+  eventsBtn.textContent = "events";
+  eventsBtn.onclick = () => openEventsGallery(cam);
 
   const badge = document.createElement("span");
   badge.className = "badge " + (running ? "running" : "stopped");
@@ -262,6 +302,7 @@ function row(cam) {
   const watchTd = document.createElement("td");
   watchTd.appendChild(watchLink);
   watchTd.appendChild(zonesBtn);
+  watchTd.appendChild(eventsBtn);
 
   const statusTd = document.createElement("td");
   statusTd.appendChild(badge);
@@ -292,10 +333,10 @@ function row(cam) {
   const prevTd = previewCell(cam);
 
   const errorTd = document.createElement("td");
-  errorTd.colSpan = 15;
+  errorTd.colSpan = 17;
   errorTd.className = "error";
 
-  tr.append(nameTd, urlTd, saveTd, startTd, stopTd, detectTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, inferTd, skipTd, detTd, zoneTd, prevTd, note);
+  tr.append(nameTd, urlTd, prevTd, saveTd, startTd, stopTd, detectTd, watchTd, statusTd, fpsTd, framesTd, restartsTd, inferTd, skipTd, detTd, zoneTd, note);
   tr.appendChild(errorTd);
 
   const act = (url, opts, after) => {
@@ -737,6 +778,64 @@ document.getElementById("mqtt-close").onclick = () => { mqttModal.style.display 
 
 loadOutputStatus();
 
+/* ---------- Events gallery (snapshots + clips per camera) ---------- */
+const eventsModal = document.getElementById("events-modal");
+const eventsTitle = document.getElementById("events-title");
+const eventsGrid = document.getElementById("events-grid");
+const eventsStatus = document.getElementById("events-status");
+
+function fmtTs(ts) {
+  return new Date(ts * 1000).toLocaleString();
+}
+
+function openEventsGallery(cam) {
+  eventsTitle.textContent = "Events — " + cam.name;
+  eventsStatus.textContent = "";
+  eventsGrid.replaceChildren();
+  eventsModal.style.display = "flex";
+  fetch("/api/cameras/" + encodeURIComponent(cam.name) + "/events")
+    .then((res) => res.json())
+    .then((evs) => {
+      if (!evs.length) {
+        const empty = document.createElement("div");
+        empty.className = "events-empty";
+        empty.textContent = "no events yet — zone alerts will appear here";
+        eventsGrid.appendChild(empty);
+        return;
+      }
+      evs.forEach((ev) => {
+        const fig = document.createElement("figure");
+        if (ev.snapshot) {
+          const img = document.createElement("img");
+          img.src = ev.snapshot;
+          img.alt = ev.zone + " snapshot";
+          img.title = "click to open full size";
+          img.onclick = () => window.open(ev.snapshot, "_blank");
+          fig.appendChild(img);
+        }
+        if (ev.clip) {
+          const video = document.createElement("video");
+          video.controls = true;
+          video.preload = "none";
+          const src = document.createElement("source");
+          src.src = ev.clip;
+          src.type = "video/mp4";
+          video.appendChild(src);
+          fig.appendChild(video);
+        }
+        const caption = document.createElement("figcaption");
+        caption.textContent = ev.zone + " · " + fmtTs(ev.timestamp) + " · track " + ev.track_id;
+        fig.appendChild(caption);
+        eventsGrid.appendChild(fig);
+      });
+    })
+    .catch((e) => { eventsStatus.textContent = "cannot load events: " + e; });
+}
+
+document.getElementById("events-close").onclick = () => {
+  eventsModal.style.display = "none";
+  refresh();
+};
 
 </script>
 </body>

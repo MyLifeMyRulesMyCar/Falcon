@@ -857,3 +857,73 @@ def test_camera_save_preserves_snapshots_section(tmp_path):
     assert client.put("/api/cameras/cam_a/zones", json=[]).status_code == 200
     loaded = load_config(cfg_path)
     assert loaded.snapshots == snap_cfg
+
+
+def _app_with_events_stores(tmp_path):
+    cameras = make_cameras()
+    snap_store = SnapshotStore(str(tmp_path / "snaps"), max_per_camera=10)
+    clip_store = ClipStore(str(tmp_path / "clips"), object(), max_per_camera=10)
+    app = create_app(
+        StubManager(cameras), cameras, snapshot_store=snap_store, clip_store=clip_store
+    )
+    app.config["TESTING"] = True
+    return app.test_client(), tmp_path
+
+
+def test_camera_events_pairs_snapshot_and_clip_by_stem(tmp_path):
+    client, tmp_path = _app_with_events_stores(tmp_path)
+    (tmp_path / "snaps" / "cam_a").mkdir(parents=True)
+    (tmp_path / "clips" / "cam_a").mkdir(parents=True)
+    (tmp_path / "snaps" / "cam_a" / "entry_path_1700000000_1.jpg").write_bytes(b"j")
+    (tmp_path / "clips" / "cam_a" / "entry_path_1700000000_1.mp4").write_bytes(b"m")
+
+    evs = client.get("/api/cameras/cam_a/events").get_json()
+    assert len(evs) == 1
+    ev = evs[0]
+    assert ev["zone"] == "entry_path"  # underscore zone survives the split
+    assert ev["timestamp"] == 1700000000
+    assert ev["track_id"] == 1
+    assert ev["snapshot"] == "/snapshots/cam_a/entry_path_1700000000_1.jpg"
+    assert ev["clip"] == "/clips/cam_a/entry_path_1700000000_1.mp4"
+
+
+def test_camera_events_snapshot_only_when_clip_not_yet_finalized(tmp_path):
+    client, tmp_path = _app_with_events_stores(tmp_path)
+    (tmp_path / "snaps" / "cam_a").mkdir(parents=True)
+    (tmp_path / "snaps" / "cam_a" / "entry_1700000000_1.jpg").write_bytes(b"j")
+
+    evs = client.get("/api/cameras/cam_a/events").get_json()
+    assert len(evs) == 1
+    assert evs[0]["snapshot"] == "/snapshots/cam_a/entry_1700000000_1.jpg"
+    assert evs[0]["clip"] is None  # no broken link before the clip muxes
+
+
+def test_camera_events_empty_dirs_returns_empty_list(tmp_path):
+    client, _ = _app_with_events_stores(tmp_path)
+    assert client.get("/api/cameras/cam_a/events").get_json() == []
+
+
+def test_camera_events_unknown_camera_404(tmp_path):
+    client, _ = _app_with_events_stores(tmp_path)
+    assert client.get("/api/cameras/nope/events").status_code == 404
+
+
+def test_camera_events_orders_newest_first(tmp_path):
+    client, tmp_path = _app_with_events_stores(tmp_path)
+    (tmp_path / "snaps" / "cam_a").mkdir(parents=True)
+    for ts in (1700000100, 1700000000):
+        (tmp_path / "snaps" / "cam_a" / f"entry_{ts}_1.jpg").write_bytes(b"j")
+
+    evs = client.get("/api/cameras/cam_a/events").get_json()
+    assert [e["timestamp"] for e in evs] == [1700000100, 1700000000]
+
+
+def test_camera_events_ignores_stray_files(tmp_path):
+    client, tmp_path = _app_with_events_stores(tmp_path)
+    (tmp_path / "snaps" / "cam_a").mkdir(parents=True)
+    (tmp_path / "snaps" / "cam_a" / "notes.txt").write_text("not an event")
+    (tmp_path / "snaps" / "cam_a" / "entry_1700000000_1.jpg").write_bytes(b"j")
+
+    evs = client.get("/api/cameras/cam_a/events").get_json()
+    assert len(evs) == 1
+    assert evs[0]["zone"] == "entry"
