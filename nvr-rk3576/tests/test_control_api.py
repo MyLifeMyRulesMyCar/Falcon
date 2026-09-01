@@ -927,3 +927,50 @@ def test_camera_events_ignores_stray_files(tmp_path):
     evs = client.get("/api/cameras/cam_a/events").get_json()
     assert len(evs) == 1
     assert evs[0]["zone"] == "entry"
+
+
+import base64
+
+import yaml
+from werkzeug.security import generate_password_hash
+
+
+def _app_with_auth(tmp_path, username="admin", password="secret"):
+    auth_file = tmp_path / "auth.yaml"
+    auth_file.write_text(
+        yaml.safe_dump({"username": username, "password_hash": generate_password_hash(password)}),
+        encoding="utf-8",
+    )
+    cameras = make_cameras()
+    app = create_app(StubManager(cameras), cameras, auth_path=str(auth_file))
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def _basic(username, password):
+    return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+
+
+def test_auth_missing_credentials_401(tmp_path):
+    client = _app_with_auth(tmp_path)
+    assert client.get("/api/cameras").status_code == 401
+
+
+def test_auth_wrong_password_401(tmp_path):
+    client = _app_with_auth(tmp_path)
+    res = client.get("/api/cameras", headers={"Authorization": _basic("admin", "wrong")})
+    assert res.status_code == 401
+    assert "Basic realm" in res.headers.get("WWW-Authenticate", "")
+
+
+def test_auth_correct_credentials_200(tmp_path):
+    client = _app_with_auth(tmp_path)
+    res = client.get("/api/cameras", headers={"Authorization": _basic("admin", "secret")})
+    assert res.status_code == 200
+
+
+def test_auth_absent_file_means_disabled(tmp_path):
+    cameras = make_cameras()
+    app = create_app(StubManager(cameras), cameras, auth_path=str(tmp_path / "nope.yaml"))
+    app.config["TESTING"] = True
+    assert app.test_client().get("/api/cameras").status_code == 200

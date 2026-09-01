@@ -4,14 +4,17 @@ Dev-server only, no auth, bound to localhost by default — an operator tool
 for the bench, not something to expose past localhost/LAN.
 """
 
+import hmac
 import os
 import threading
 import time
 from typing import Optional
 
 import numpy as np
+import yaml
 from flask import Flask, Response, jsonify, request, send_file
 from PIL import Image
+from werkzeug.security import check_password_hash
 
 from nvr.config import (
     CameraConfig,
@@ -104,6 +107,7 @@ def create_app(
     snapshot_config: Optional[SnapshotConfig] = None,
     clip_store: Optional[ClipStore] = None,
     clip_config: Optional[ClipConfig] = None,
+    auth_path: Optional[str] = None,
 ) -> Flask:
     """Build the Flask app. ``cameras`` is the live name->config dict the
     panel edits; the manager must own the same CameraConfig objects.
@@ -137,6 +141,34 @@ def create_app(
     publish_detections_flags = (
         publish_detections_flags if publish_detections_flags is not None else {}
     )
+
+    # v1.6 Basic Auth. Opt-in via auth_path (the panel passes
+    # "config/auth.yaml"); run_control_panel.py's non-loopback guard enforces
+    # that file exists before the panel is exposed on the LAN. Absent ->
+    # no auth.
+    _auth = None
+    if auth_path is not None and os.path.exists(auth_path):
+        try:
+            with open(auth_path, encoding="utf-8") as f:
+                _auth = yaml.safe_load(f)
+        except Exception:
+            _auth = None
+
+    @app.before_request
+    def _require_auth():
+        if _auth is None:
+            return  # no auth configured (loopback-only)
+        a = request.authorization
+        if (
+            not a
+            or not hmac.compare_digest(a.username or "", _auth.get("username", ""))
+            or not check_password_hash(_auth.get("password_hash", ""), a.password or "")
+        ):
+            return Response(
+                "Auth required",
+                401,
+                {"WWW-Authenticate": 'Basic realm="Falcon NVR"'},
+            )
 
     # Frame counters only advance when someone drains the queues. The smoke
     # test does that in its loop; here a background thread does it so the
@@ -531,12 +563,22 @@ def create_app(
             return jsonify({"error": "'port' must be in 1..65535"}), 400
         if not isinstance(prefix, str) or not prefix.strip():
             return jsonify({"error": "'topic_prefix' must be a non-empty string"}), 400
+        # v1.6 TLS fields aren't edited in the UI; carry them through so a
+        # settings save never silently drops them.
+        use_tls = body.get("use_tls", mqtt_config.use_tls)
+        ca_cert = body.get("ca_cert", mqtt_config.ca_cert)
+        if not isinstance(use_tls, bool):
+            return jsonify({"error": "'use_tls' must be a boolean"}), 400
+        if ca_cert is not None and not isinstance(ca_cert, str):
+            return jsonify({"error": "'ca_cert' must be a string or absent"}), 400
         new_config = MqttConfig(
             host=host.strip(),
             port=port,
             topic_prefix=prefix.strip(),
             username=username,
             password=password,
+            use_tls=use_tls,
+            ca_cert=ca_cert,
             enabled=mqtt_config.enabled,
         )
         if config_path:
@@ -552,6 +594,8 @@ def create_app(
         mqtt_config.topic_prefix = new_config.topic_prefix
         mqtt_config.username = new_config.username
         mqtt_config.password = new_config.password
+        mqtt_config.use_tls = new_config.use_tls
+        mqtt_config.ca_cert = new_config.ca_cert
         mqtt_publisher.reconfigure(new_config)
         return jsonify(
             {
@@ -559,6 +603,7 @@ def create_app(
                 "port": mqtt_config.port,
                 "topic_prefix": mqtt_config.topic_prefix,
                 "username": mqtt_config.username,
+                "use_tls": mqtt_config.use_tls,
             }
         )
 

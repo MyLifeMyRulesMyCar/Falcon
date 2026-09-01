@@ -77,6 +77,19 @@ cameras:
     url: rtsp://a
 """
 
+MQTT_TLS_YAML = """
+mqtt:
+  host: 127.0.0.1
+  port: 8883
+  topic_prefix: nvr
+  username: admin
+  use_tls: true
+  ca_cert: config/panel.crt
+cameras:
+  - name: cam_a
+    url: rtsp://a
+"""
+
 
 def _write(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "config.yaml"
@@ -351,3 +364,27 @@ def test_write_config_round_trips_clips(tmp_path):
     loaded = load_config(str(out))
     assert loaded.clips == cfg.clips
     assert loaded.cameras == cfg.cameras
+
+
+def test_mqtt_tls_parse(tmp_path):
+    cfg = load_config(str(_write(tmp_path, MQTT_TLS_YAML)))
+    assert cfg.mqtt is not None
+    assert cfg.mqtt.port == 8883
+    assert cfg.mqtt.use_tls is True
+    assert cfg.mqtt.ca_cert == "config/panel.crt"
+
+
+def test_mqtt_tls_defaults_when_absent(tmp_path):
+    cfg = load_config(str(_write(tmp_path, MQTT_HTTP_YAML)))
+    assert cfg.mqtt.use_tls is False
+    assert cfg.mqtt.ca_cert is None
+
+
+def test_write_config_round_trips_mqtt_tls(tmp_path):
+    cfg = load_config(str(_write(tmp_path, MQTT_TLS_YAML)))
+    out = tmp_path / "out.yaml"
+    write_config(str(out), cfg.cameras, cfg.mqtt, cfg.http_output, cfg.snapshots, cfg.clips)
+    loaded = load_config(str(out))
+    assert loaded.mqtt == cfg.mqtt
+    assert loaded.mqtt.use_tls is True
+    assert loaded.mqtt.ca_cert == "config/panel.crt"

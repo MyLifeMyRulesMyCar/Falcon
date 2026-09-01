@@ -30,6 +30,8 @@ class MqttConfig:
     topic_prefix: str = "nvr"
     username: Optional[str] = None
     password: Optional[str] = None
+    use_tls: bool = False
+    ca_cert: Optional[str] = None
     enabled: bool = True
 
 
@@ -179,12 +181,20 @@ def _parse_mqtt(raw) -> Optional[MqttConfig]:
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("'mqtt.enabled' must be a boolean")
+    use_tls = raw.get("use_tls", False)
+    if not isinstance(use_tls, bool):
+        raise ConfigError("'mqtt.use_tls' must be a boolean")
+    ca_cert = raw.get("ca_cert")
+    if ca_cert is not None and not isinstance(ca_cert, str):
+        raise ConfigError("'mqtt.ca_cert' must be a string or absent")
     return MqttConfig(
         host=host,
         port=port,
         topic_prefix=prefix,
         username=username,
         password=password,
+        use_tls=use_tls,
+        ca_cert=ca_cert,
         enabled=enabled,
     )
 
@@ -385,6 +395,10 @@ def write_config(
             **({"password": mqtt.password} if mqtt.password else {}),
             "enabled": mqtt.enabled,
         }
+        if mqtt.use_tls:
+            doc["mqtt"]["use_tls"] = True
+        if mqtt.ca_cert:
+            doc["mqtt"]["ca_cert"] = mqtt.ca_cert
     if http_output is not None:
         doc["http_output"] = {
             "url": http_output.url,

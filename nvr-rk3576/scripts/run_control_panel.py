@@ -10,6 +10,7 @@ Usage:
 import argparse
 import atexit
 import multiprocessing
+import os
 import sys
 from pathlib import Path
 
@@ -33,7 +34,18 @@ def main() -> None:
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5050)
     parser.add_argument("--config", type=str, default="config/config.yaml")
+    parser.add_argument("--cert", type=str, default="config/panel.crt")
+    parser.add_argument("--key", type=str, default="config/panel.key")
     args = parser.parse_args()
+
+    # v1.6 hardening: never silently serve an unauthenticated panel on the
+    # LAN. Loopback stays auth-optional; anything else requires auth.yaml.
+    if args.host not in ("127.0.0.1", "localhost") and not os.path.exists("config/auth.yaml"):
+        sys.exit(
+            "refusing to start on %s: no config/auth.yaml (panel would be "
+            "unauthenticated on the LAN). Run scripts/set_panel_password.py first."
+            % args.host
+        )
 
     config = load_config(args.config)
     cameras = {c.name: c for c in config.cameras}
@@ -182,9 +194,19 @@ def main() -> None:
         snapshot_config=config.snapshots,
         clip_store=clip_store,
         clip_config=config.clips,
+        auth_path="config/auth.yaml",
     )
     print(f"control panel: http://{args.host}:{args.port}  ({len(cameras)} cameras)")
-    app.run(host=args.host, port=args.port, threaded=True)
+    ssl_ctx = None
+    if os.path.exists(args.cert) and os.path.exists(args.key):
+        ssl_ctx = (args.cert, args.key)
+    else:
+        print(
+            f"no TLS cert found at {args.cert} — serving plain HTTP. "
+            "Run scripts/gen_tls_cert.sh.",
+            file=sys.stderr,
+        )
+    app.run(host=args.host, port=args.port, threaded=True, ssl_context=ssl_ctx)
 
 
 if __name__ == "__main__":

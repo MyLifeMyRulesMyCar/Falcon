@@ -60,8 +60,23 @@ class MqttPublisher:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.username is not None:
             client.username_pw_set(config.username, config.password)
+        if config.use_tls:
+            # Verify against the actual self-signed cert — never
+            # tls_insecure_set(True), which would silently disable the
+            # verification this hardening exists to provide.
+            client.tls_set(ca_certs=config.ca_cert or "config/panel.crt")
         client.reconnect_delay_set(min_delay=1, max_delay=30)
-        client.connect(config.host, config.port)
+        try:
+            # Non-blocking: connect_async returns immediately and the network
+            # loop retries until the broker is reachable. A down or
+            # misconfigured broker (e.g. hardened mosquitto with a config not
+            # updated yet) must never take the panel down at startup — that's
+            # the "dead broker never stalls detection" promise applied to the
+            # initial connect, not just steady state.
+            client.connect_async(config.host, config.port)
+        except Exception:
+            log.warning("mqtt connect_async failed (will retry in background): %s:%s",
+                        config.host, config.port)
         client.loop_start()
         return client
 

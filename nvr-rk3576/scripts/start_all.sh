@@ -31,10 +31,21 @@ else
     echo "[2/4] panel already running"
 fi
 
-# 3. cameras through the panel API (they begin stopped).
+# 3. cameras through the panel API (they begin stopped). v1.6: use https +
+#    the panel's own cert when hardened, and authenticate via
+#    FALCON_PANEL_AUTH="user:pass".
+SCHEME="http"
+CURL_EXTRA=()
+if [ -f config/panel.crt ]; then
+    SCHEME="https"
+    CURL_EXTRA+=(--cacert config/panel.crt)
+fi
+if [ -n "${FALCON_PANEL_AUTH:-}" ]; then
+    CURL_EXTRA+=(-u "$FALCON_PANEL_AUTH")
+fi
 echo "[3/4] starting cameras ..."
 for c in cam_a cam_b cam_c cam_d; do
-    curl -s -X POST "http://127.0.0.1:5050/api/cameras/$c/start" > /dev/null || true
+    curl -s "${CURL_EXTRA[@]}" -X POST "$SCHEME://127.0.0.1:5050/api/cameras/$c/start" > /dev/null || true
 done
 
 # 4. mosquitto (M5 broker) — it is a systemd service, so this is just a
