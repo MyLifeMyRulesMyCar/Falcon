@@ -154,21 +154,39 @@ def create_app(
         except Exception:
             _auth = None
 
+    # Basic Auth with a strong KDF (scrypt) costs ~100ms per check — fine for
+    # the occasional request, but the dashboard polls the preview snapshots
+    # many times a second, which would cap the whole panel at a few req/s.
+    # Browsers send the same Authorization header every request, so cache the
+    # accepted header and only run the full hash check once per credential-set
+    # per TTL. Wrong credentials are never cached and always fully verified.
+    _AUTH_CACHE_TTL = 60.0
+    _auth_cache: dict = {}
+
     @app.before_request
     def _require_auth():
         if _auth is None:
             return  # no auth configured (loopback-only)
         a = request.authorization
+        if not a:
+            return _auth_denied()
+        header = request.headers.get("Authorization", "")
+        cached = _auth_cache.get(header)
+        if cached is not None and time.monotonic() - cached < _AUTH_CACHE_TTL:
+            return
         if (
-            not a
-            or not hmac.compare_digest(a.username or "", _auth.get("username", ""))
+            not hmac.compare_digest(a.username or "", _auth.get("username", ""))
             or not check_password_hash(_auth.get("password_hash", ""), a.password or "")
         ):
-            return Response(
-                "Auth required",
-                401,
-                {"WWW-Authenticate": 'Basic realm="Falcon NVR"'},
-            )
+            return _auth_denied()
+        _auth_cache[header] = time.monotonic()
+        if len(_auth_cache) > 16:  # bounded; a single-operator panel rarely exceeds 1
+            _auth_cache.clear()
+
+    def _auth_denied():
+        return Response(
+            "Auth required", 401, {"WWW-Authenticate": 'Basic realm="Falcon NVR"'}
+        )
 
     # Frame counters only advance when someone drains the queues. The smoke
     # test does that in its loop; here a background thread does it so the

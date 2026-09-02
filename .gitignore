@@ -36,5 +36,9 @@ nvr-rk3576/config/panel.crt
 nvr-rk3576/config/panel.key
 nvr-rk3576/config/auth.yaml
 
+# v1.1/v1.3 event evidence output (runtime dirs, created by the panel)
+nvr-rk3576/snapshots/
+nvr-rk3576/clips/
+
 # RKNN model binary (copied from ~/rk3576_rknn_yolov5_demo/model/)
 nvr-rk3576/nvr/inference/model/*.rknn

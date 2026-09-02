@@ -159,7 +159,11 @@ function tickSnapshot(name) {
 function startSnapshot(name, img) {
   const s = snapshots[name];
   if (s) { s.img = img; return; }  // already polling; just refresh the element ref
-  const timer = setInterval(() => tickSnapshot(name), 1000);
+  // Fast-poll the pre-encoded snapshot slot so the dashboard renders every
+  // frame the ~6fps backend produces (was a 1s slideshow). A higher backend
+  // cadence than this board's CPU can afford doesn't help — the full stack
+  // already runs near 100%, and each poll is a short GET of slot bytes.
+  const timer = setInterval(() => tickSnapshot(name), 150);
   snapshots[name] = { img, timer };
   tickSnapshot(name);
 }

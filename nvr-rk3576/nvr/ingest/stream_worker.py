@@ -17,7 +17,11 @@ log = logging.getLogger(__name__)
 
 _FRAME_RATE_FALLBACK = 0.0
 _RESTART_CAP_SECONDS = 30
-_PREVIEW_INTERVAL = 0.16  # ~6 fps regular preview cadence (steady > fast)
+_PREVIEW_INTERVAL = 0.16  # ~6 fps preview cadence. Measured reality on this
+# board: the full stack (4x decode + detection + 2 preview encoders) already
+# runs ~97% CPU, so raising the encode cadence above ~6fps starves the panel's
+# HTTP and does NOT improve what the browser actually receives. 6fps is the
+# ceiling; the dashboard fast-polls to render every frame the backend makes.
 
 
 class StreamProbeError(Exception):
@@ -209,9 +213,7 @@ class StreamWorker(multiprocessing.Process):
                     self._count_decoded()
                     if frames_after_restart == 1:
                         self._clear_error()
-                    # Throttled broadcast (~1/3 of ingest -> ~10 fps) for the
-                    # browser preview streams; skipped frames just age out.
-                    # Time-based broadcast throttle (~8 fps regular cadence)
+                    # Time-based broadcast throttle (~6 fps regular cadence)
                     # for the browser preview streams: a steady frame rate
                     # reads as smooth, unlike a count-based one that rides
                     # the decode rate. Skipped frames just age out.
